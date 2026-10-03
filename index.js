@@ -71,7 +71,7 @@ app.post('/api/feedback', async (req, res) => {
         urgency: 'Normal',
         category: 'ข้อเสนอแนะทั่วไป',
         summary: `${text} (บันทึกเมื่อ: ${formattedDate})`,
-        
+        action_recommendation: 'ได้รับข้อความเรียบร้อย'
       } 
     });
 
