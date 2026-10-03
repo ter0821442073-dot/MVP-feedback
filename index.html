@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <title>AI Feedback & Sentiment Alert System</title>
+    <style>
+        body { font-family: sans-serif; max-width: 650px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
+        textarea { width: 100%; height: 120px; margin-bottom: 10px; padding: 10px; box-sizing: border-box; font-size: 14px; }
+        button { padding: 10px 20px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
+        #result { margin-top: 20px; padding: 15px; border-radius: 6px; background-color: #f8f9fa; border: 1px solid #ddd; display: none; }
+        .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-weight: bold; color: white; }
+        .bg-Negative { background-color: #dc3545; }
+        .bg-Neutral { background-color: #ffc107; color: #333; }
+        .bg-Positive { background-color: #28a745; }
+        .alert-box { margin-top: 10px; padding: 10px; background-color: #f8d7da; color: #721c24; border-radius: 4px; border: 1px solid #f5c6cb; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h2>ส่งFeedback และการแจ้งเตือน</h2>
+    <textarea id="inputText" placeholder="พิมพ์ข้อความจากลูกค้า เช่น 'ปัญหาที่พบเจอ การบริการ สิ่งที่อยากแนะนำ อื่นๆ'..."></textarea>
+    <button onclick="sendFeedback()">ส่งข้อความ</button>
+
+    <div id="result"></div>
+
+    <script>
+        async function sendFeedback() {
+            const text = document.getElementById('inputText').value;
+            const resultDiv = document.getElementById('result');
+            
+            if (!text) return alert('กรุณากรอกข้อความก่อนครับ');
+            
+            resultDiv.style.display = 'block';
+            resultDiv.innerHTML = 'กำลังวิเคราะห์ข้อความจาก AI...';
+
+            try {
+                const response = await fetch('/api/feedback', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text })
+                });
+                
+                const data = await response.json();
+                
+                if (data.error) {
+                    resultDiv.innerHTML = `<span style="color:red">${data.error}</span>`;
+                    return;
+                }
+
+                const res = data.analysis;
+                let alertHtml = '';
+                if (res.sentiment === 'Negative' && (res.urgency === 'High' || res.urgency === 'Medium')) {
+                    alertHtml = `<div class="alert-box">🚨 ระบบส่งแจ้งเตือนด่วนเข้า Telegram เรียบร้อยแล้ว!</div>`;
+                }
+
+                resultDiv.innerHTML = `
+                    <h3>ผลการวิเคราะห์</h3>
+                    <p><strong>Sentiment:</strong> <span class="badge bg-${res.sentiment}">${res.sentiment}</span></p>
+                    <p><strong>ระดับความด่วน:</strong> ${res.urgency}</p>
+                    <p><strong>หมวดหมู่:</strong> ${res.category}</p>
+                    <p><strong>สรุปปัญหา:</strong> ${res.summary}</p>
+                    <p><strong>คำแนะนำทีมงาน:</strong> ${res.action_recommendation}</p>
+                    ${alertHtml}
+                `;
+            } catch (err) {
+                resultDiv.innerHTML = '<span style="color:red">เกิดข้อผิดพลาดในการเชื่อมต่อ</span>';
+            }
+        }
+    </script>
+</body>
+</html>
