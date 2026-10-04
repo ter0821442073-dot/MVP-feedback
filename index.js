@@ -17,55 +17,39 @@ async function analyzeFeedbackWithAI(customerText) {
         return getDefaultAnalysis(customerText);
     }
 
-    const prompt = `คุณคือผู้เชี่ยวชาญด้านการวิเคราะห์ความพึงพอใจของลูกค้าและการบริหารจัดการบริการ (Customer Service AI)
+    // กำหนด System Instruction และ Prompt สำหรับวิเคราะห์
+    const systemInstruction = `คุณคือระบบ AI ประเมินวิเคราะห์ Feedback ของลูกค้าสำหรับโรงภาพยนตร์/สถานที่บริการ 
+กฎเหล็กในการวิเคราะห์:
+1. หากลูกค้าบ่นเรื่อง "ความร้อน", "แอร์ไม่เย็น", "กลิ่นเหม็น", "สิ่งสกปรก", "อาหารเสีย", "อุปกรณ์พัง/เสีย" ต้องประเมินเป็น:
+   - sentiment: "Negative"
+   - urgency: "Critical"
+2. หากลูกค้าชมเรื่องบริการ พนักงาน หรือสิ่งอำนวยความสะดวก:
+   - sentiment: "Positive"
+   - urgency: "Low"
+3. ต้องตอบกลับเฉพาะรูปแบบ JSON ภาษาไทยตรงตามโครงสร้างที่กำหนดเท่านั้น ห้ามมีข้อความอื่น`;
 
-หน้าที่ของคุณคือวิเคราะห์ข้อความ Feedback ต่อไปนี้ แล้วประเมินผลอย่างแม่นยำตามหลักเกณฑ์ที่กำหนด:
+    const prompt = `วิเคราะห์ข้อความนี้: "${customerText}"
 
-ข้อความจากลูกค้า: "${customerText}"
-
----
-เกณฑ์การประเมิน:
-1. sentiment:
-   - "Negative": คำติ ข้อร้องเรียน ปัญหา ความไม่พอใจ เช่น ร้อน, แอร์ไม่เย็น, รอนาน, อาหารเสีย, พนักงานพูดจาไม่ดี
-   - "Positive": คำชม เรื่องดีๆ ประทับใจในการบริการ/สินค้า
-   - "Neutral": คำถามทั่วไป ข้อเสนอแนะกลางๆ ที่ไม่มีอารมณ์บวกหรือลบ
-
-2. urgency:
-   - "Critical": ปัญหาร้ายแรงฉุกเฉินที่กระทบความสบายหรือประสบการณ์ของลูกค้าอย่างมาก เช่น ร้อนมาก, แอร์เสีย/แอร์ไม่เย็น, สิ่งสกปรก, อาหารมีสิ่งแปลกปลอม, อันตราย
-   - "High": ปัญหาส่งผลกระทบต่อความพึงพอใจสูง เช่น รอนานมาก, พนักงานแสดงกิริยาไม่ดี, สินค้าผิดพลาด
-   - "Medium": ข้อร้องเรียนเล็กน้อย หรือปัญหาที่ปรับปรุงได้ทั่วไป
-   - "Low": คำชมเชย ข้อเสนอแนะทั่วไปที่ไม่รีบด่วน
-
-3. category: ระบุหมวดหมู่ เช่น "สภาพแวดล้อม/สถานที่", "การบริการของพนักงาน", "คุณภาพสินค้า/อาหาร", "ระยะเวลาการรอ", "อื่นๆ"
-4. summary: สรุปปัญหา/คำชมสั้นๆ ใน 1 ประโยค
-5. action_recommendation: คำแนะนำการดำเนินการแก้ไขหรือรับมือสำหรับผู้จัดการร้าน
-
----
-ตัวอย่างการวิเคราะห์:
-- ถ้าลูกค้าบอก: "โรง 1 แอร์ไม่เย็นเลยครับ" หรือ "ในโรงร้อนมาก"
-  ตอบ JSON: {"sentiment": "Negative", "urgency": "Critical", "category": "สภาพแวดล้อม/สถานที่", "summary": "ลูกค้าแจ้งปัญหาแอร์ไม่เย็น/อากาศร้อนในโรง 1", "action_recommendation": "ส่งช่างภาพ/เจ้าหน้าที่ตรวจสอบและปรับอุณหภูมิแอร์ในโรง 1 ทันที"}
-
-- ถ้าลูกค้าบอก: "พนักงานบริการดีมากครับ"
-  ตอบ JSON: {"sentiment": "Positive", "urgency": "Low", "category": "การบริการของพนักงาน", "summary": "ลูกค้าชื่นชมการบริการของพนักงาน", "action_recommendation": "ส่งต่อคำชมให้พนักงานเพื่อเป็นกำลังใจในการทำงาน"}
-
----
-คำสั่ง: กรุณาตอบกลับเป็นรูปแบบ JSON ภาษาไทยเท่านั้น ไม่ต้องใส่ข้อความเกริ่นหรือ Markdown ใดๆ:
+ส่งคืนค่าในรูปแบบ JSON ดังนี้:
 {
   "sentiment": "Positive" | "Neutral" | "Negative",
   "urgency": "Low" | "Medium" | "High" | "Critical",
-  "category": "string",
-  "summary": "string",
-  "action_recommendation": "string"
+  "category": "หมวดหมู่ปัญหาหรือคำชม",
+  "summary": "สรุปประเด็นสั้นๆ ใน 1 ประโยค",
+  "action_recommendation": "ข้อเสนอแนะการดำเนินการแก้ไขสำหรับผู้จัดการ"
 }`;
 
     try {
-        // เปลี่ยนชื่อโมเดลเป็น gemini-3.8-flash เพื่อความถูกต้องและเสถียร
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
+        // ใช้ gemini-2.0-flash เพื่อความรวดเร็วและแม่นยำสูง
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
 
         const response = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
+                systemInstruction: {
+                    parts: [{ text: systemInstruction }]
+                },
                 contents: [{ parts: [{ text: prompt }] }],
                 generationConfig: {
                     responseMimeType: 'application/json'
@@ -95,28 +79,38 @@ async function analyzeFeedbackWithAI(customerText) {
     }
 }
 
-// ค่าเริ่มต้นกรณีเรียก AI ไม่สำเร็จ (ป้องกัน Error 500)
+// ค่าเริ่มต้นกรณีเรียก AI ไม่สำเร็จ (ปรับระบบดักจับคำให้ตรงเป้าหมาย)
 function getDefaultAnalysis(text) {
-    // ปรับ fallback ให้วิเคราะห์คำว่า "ร้อน" หรือ "แอร์" เบื้องต้นไว้ก่อนเผื่อ API ล่ม
-    const isHotOrAC = text.includes('ร้อน') || text.includes('แอร์');
+    const textLower = text.toLowerCase();
+    // เพิ่มคำดักจับเรื่องความร้อน โรงภาพยนตร์ และแอร์
+    const isCriticalIssue = ['ร้อน', 'แอร์', 'อบอ้าว', 'พัง', 'เสีย', 'เหม็น', 'ช้ามาก', 'ห่วย'].some(keyword => textLower.includes(keyword));
+
+    if (isCriticalIssue) {
+        return {
+            sentiment: 'Negative',
+            urgency: 'Critical',
+            category: 'สภาพแวดล้อม/สถานที่',
+            summary: text,
+            action_recommendation: 'ส่งทีมช่าง/เจ้าหน้าที่เข้าตรวจสอบสภาพแวดล้อมและระบบเครื่องปรับอากาศในพื้นที่ทันที'
+        };
+    }
+
     return {
-        sentiment: isHotOrAC ? 'Negative' : 'Neutral',
-        urgency: isHotOrAC ? 'Critical' : 'Medium',
-        category: isHotOrAC ? 'สภาพแวดล้อม/สถานที่' : 'ทั่วไป',
+        sentiment: 'Neutral',
+        urgency: 'Medium',
+        category: 'ข้อเสนอแนะทั่วไป',
         summary: text,
-        action_recommendation: isHotOrAC 
-            ? 'ตรวจสอบระบบเครื่องปรับอากาศในพื้นที่โดยด่วน' 
-            : 'ตรวจสอบข้อความและพิจารณาดำเนินการตามความเหมาะสม'
+        action_recommendation: 'ตรวจสอบข้อความและพิจารณาดำเนินการตามความเหมาะสม'
     };
 }
 
-// ฟังก์ชันแปลงระดับความเร่งด่วนเป็น Emoji
+// ฟังก์ชันแปลงระดับความเร่งด่วนเป็น Emoji และการเน้นข้อความ
 function getUrgencyEmoji(urgency) {
     switch (urgency) {
-        case 'Critical': return '🚨🚨 *CRITICAL*';
-        case 'High': return '🔴 *HIGH*';
-        case 'Medium': return '🟠 *MEDIUM*';
-        case 'Low': return '🟢 *LOW*';
+        case 'Critical': return '🚨🚨 *CRITICAL (ด่วนที่สุด)*';
+        case 'High': return '🔴 *HIGH (ด่วนมาก)*';
+        case 'Medium': return '🟠 *MEDIUM (ปานกลาง)*';
+        case 'Low': return '🟢 *LOW (ทั่วไป)*';
         default: return '⚪ *NORMAL*';
     }
 }
@@ -192,10 +186,8 @@ app.post('/api/feedback', async (req, res) => {
         // 1. วิเคราะห์ด้วย AI (พร้อมระบบป้องกันข้อผิดพลาด)
         const analysis = await analyzeFeedbackWithAI(text);
 
-        // 2. ส่งเข้า Telegram (ไม่ขัดจังหวะการตอบกลับถ้าส่งไม่ผ่าน)
-        sendTelegramAlert(text, formattedDate, analysis).catch(err => 
-            console.error('Telegram background alert error:', err)
-        );
+        // 2. ส่งเข้า Telegram
+        await sendTelegramAlert(text, formattedDate, analysis);
 
         // 3. ส่งข้อมูลกลับไปยังหน้าเว็บ Frontend
         return res.json({
