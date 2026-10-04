@@ -7,52 +7,74 @@ const app = express();
 app.use(express.json());
 
 /**
- * ค่าเริ่มต้นกรณี AI ล้มเหลว หรือประมวลผลผิดพลาด (Version 3.9)
- * แยกแยะ Sentiment (คำติ) และหมวดหมู่อย่างเด็ดขาด
+ * ฟังก์ชันจำแนกหมวดหมู่และวิเคราะห์สำรอง (Version 4.0 - Strict Matching)
+ * แก้ปัญหาคีย์เวิร์ดตีกันระหว่าง เหม็น/ห้องน้ำ กับ อาหาร/แอร์
  */
 function getDefaultAnalysis(text) {
     const textLower = text.toLowerCase();
+
+    // 1. ตรวจจับเรื่องความสะอาด และสถานที่ (เช่น ห้องน้ำเหม็น, พื้นเหนียว, เบาะสกปรก)
+    const isSanitation = ['ห้องน้ำ', 'เหม็น', 'สกปรก', 'ขยะ', 'พื้นเหนียว', 'เบาะเปรอะ', 'กลิ่น'].some(k => textLower.includes(k));
     
-    // คำที่แสดงถึงปัญหา / ข้อติ
-    const isNegative = ['หนาว', 'ร้อน', 'แอร์', 'อบอ้าว', 'เหม็น', 'ไม่กรอบ', 'เหนียว', 'เค็ม', 'ช้า', 'ห่วย', 'พัง', 'เสีย', 'เบา', 'ดัง', 'กระตุก'].some(k => textLower.includes(k));
+    // 2. ตรวจจับเรื่องระบบปรับอากาศ / อุณหภูมิ
+    const isHVAC = ['แอร์', 'หนาว', 'ร้อน', 'อบอ้าว', 'อุณหภูมิ', 'เย็นเกิน', 'ร้อนมาก'].some(k => textLower.includes(k));
     
-    // ตรวจจับหมวดหมู่อุณหภูมิและแอร์
-    const isTemp = ['หนาว', 'ร้อน', 'แอร์', 'อบอ้าว', 'อุณหภูมิ'].some(k => textLower.includes(k));
-    // ตรวจจับหมวดหมู่อาหาร
-    const isFood = ['ป๊อปคอร์น', 'ป็อบคอร์น', 'น้ำ', 'ขนม', 'ไม่กรอบ', 'เค็ม', 'เหนียว'].some(k => textLower.includes(k));
-    // ตรวจจับหมวดหมู่สถานที่/ความสะอาด
-    const isClean = ['ห้องน้ำ', 'เหม็น', 'สกปรก', 'ขยะ', 'พื้นเหนียว', 'เบาะ'].some(k => textLower.includes(k));
-    // ตรวจจับหมวดหมู่ระบบฉายและเสียง
-    const isAV = ['เสียง', 'ภาพ', 'จอ', 'ซับ', 'ดับ', 'กระตุก', 'ภาพเบลอ'].some(k => textLower.includes(k));
+    // 3. ตรวจจับเรื่องอาหารและเครื่องดื่ม
+    const isFood = ['ป๊อปคอร์น', 'ป็อบคอร์น', 'น้ำอัดลม', 'น้ำแก้ว', 'ขนม', 'ไม่กรอบ', 'เหนียว', 'เค็ม', 'หวาน', 'อาหาร'].some(k => textLower.includes(k));
+    
+    // 4. ตรวจจับเรื่องระบบฉายและเสียง
+    const isAV = ['เสียง', 'ภาพ', 'จอ', 'ซับ', 'ดับ', 'กระตุก', 'ภาพเบลอ', 'ลำโพง'].some(k => textLower.includes(k));
+
+    // 5. ตรวจจับเรื่องพนักงาน
+    const isStaff = ['พนักงาน', 'บริการ', 'ชักสีหน้า', 'พูดจา', 'แถวยาว', 'คิดเงินผิด'].some(k => textLower.includes(k));
+
+    // 6. ตรวจจับเรื่องตั๋วหนัง/แอป
+    const isTicket = ['ตั๋ว', 'แอป', 'ตู้', 'จอง', 'ตัดเงิน'].some(k => textLower.includes(k));
+
+    // ประเมิน Sentiment และ Urgency
+    const isNegative = isSanitation || isHVAC || isFood || isAV || isStaff || isTicket || ['พัง', 'เสีย', 'ห่วย', 'ช้ามาก'].some(k => textLower.includes(k));
 
     let category = 'ทั่วไป / คำชม';
-    if (isTemp) {
-        category = 'สภาพแวดล้อมและสถานที่ (อุณหภูมิ/แอร์)';
+    let action = 'ตรวจสอบข้อความและพิจารณาดำเนินการตามความเหมาะสม';
+    let urgency = 'Low';
+
+    if (isSanitation) {
+        category = 'ความสะอาดและสถานที่';
+        action = 'แจ้งแม่บ้าน/ทีมทำความสะอาดเข้าตรวจสอบและจัดการความสะอาด/กลิ่นเหม็นในพื้นที่ทันที';
+        urgency = 'High';
+    } else if (isHVAC) {
+        category = 'ระบบปรับอากาศ (แอร์)';
+        action = 'ประสานงานช่างอาคารเข้าตรวจสอบและปรับอุณหภูมิเครื่องปรับอากาศให้เหมาะสมด่วน';
+        urgency = 'Critical';
     } else if (isFood) {
         category = 'อาหารและเครื่องดื่ม';
-    } else if (isClean) {
-        category = 'ความสะอาดและสถานที่';
+        action = 'ตรวจสอบคุณภาพอาหาร/เครื่องดื่มในเคาน์เตอร์ และเปลี่ยนสินค้าใหม่ให้ลูกค้า';
+        urgency = 'Medium';
     } else if (isAV) {
         category = 'ระบบฉายและเสียง';
+        action = 'แจ้งช่างเทคนิคประจำโรงภาพยนตร์เข้าตรวจสอบระบบภาพและเสียงทันที';
+        urgency = 'Critical';
+    } else if (isStaff) {
+        category = 'พนักงานและการบริการ';
+        action = 'ประสานงานผู้จัดการสาขาตักเตือนและปรับปรุงการให้บริการของพนักงาน';
+        urgency = 'Medium';
+    } else if (isTicket) {
+        category = 'ระบบตั๋วและแอปพลิเคชัน';
+        action = 'ตรวจสอบระบบการชำระเงิน/ตู้จำหน่ายตั๋วเพื่อแก้ไขปัญหาให้ลูกค้า';
+        urgency = 'High';
     }
 
     return {
         sentiment: isNegative ? 'Negative' : 'Neutral',
-        urgency: (isTemp || isAV) ? 'Critical' : (isFood || isClean) ? 'Medium' : 'Low',
+        urgency: isNegative ? urgency : 'Low',
         category: category,
         summary: text,
-        action_recommendation: isTemp
-            ? 'ปรับอุณหภูมิเครื่องปรับอากาศในโรงภาพยนตร์ให้อยู่ในระดับที่เหมาะสมทันที'
-            : isFood
-                ? 'ตรวจสอบคุณภาพอาหาร/ป๊อปคอร์น และเปลี่ยนสินค้าใหม่ให้ลูกค้า'
-                : isClean
-                    ? 'ส่งแม่บ้าน/พนักงานทำความสะอาดเข้าจัดการพื้นที่ทันที'
-                    : 'ตรวจสอบข้อความและพิจารณาดำเนินการตามความเหมาะสม'
+        action_recommendation: action
     };
 }
 
 /**
- * ฟังก์ชันเรียก AI วิเคราะห์ความคิดเห็น (Version 3.9)
+ * ฟังก์ชันเรียก AI วิเคราะห์ความคิดเห็น (Cinema Version 4.0)
  */
 async function analyzeFeedbackWithAI(customerText) {
     const apiKey = process.env.GEMINI_API_KEY;
@@ -61,36 +83,30 @@ async function analyzeFeedbackWithAI(customerText) {
         return getDefaultAnalysis(customerText);
     }
 
-    const promptText = `คุณคือ AI วิเคราะห์ความคิดเห็นลูกค้าสำหรับธุรกิจโรงภาพยนตร์ (Cinema Version 3.9)
-วิเคราะห์ข้อความนี้: "${customerText}"
+    const promptText = `คุณคือ AI วิเคราะห์ความคิดเห็นลูกค้าสำหรับธุรกิจโรงภาพยนตร์ (Cinema Version 4.0)
+จงจำแนกหมวดหมู่ ข้อความลูกค้า: "${customerText}" 
 
-[กฎเหล็กเรื่อง Sentiment (ความรู้สึก)]:
-- หากเป็นคำบ่น ข้อติ ปัญหา หรือสิ่งที่ไม่พอใจ เช่น "หนาวมาก", "ป๊อปคอร์นไม่กรอบ", "ห้องน้ำเหม็น", "แอร์ร้อน" -> บังคับ sentiment: "Negative" เท่านั้น (ห้ามใส่ Positive หรือ Neutral เด็ดขาด!)
-- หากเป็นคำชมเชย ประทับใจ -> sentiment: "Positive"
+[ตารางจำแนกหมวดหมู่ (category) บังคับปฏิบัติตามอย่างเคร่งครัด]:
+1. "ความสะอาดและสถานที่" -> เรื่อง ห้องน้ำเหม็น, ห้องน้ำสกปรก, กลิ่นเหม็น, พื้นเหนียว, เบาะเปรอะ, ขยะ (***หากเจอเรื่องห้องน้ำเหม็น บังคับตอบหมวดนี้เท่านั้น ห้ามตอบอาหารเด็ดขาด!***)
+2. "ระบบปรับอากาศ (แอร์)" -> เรื่อง แอร์หนาว, แอร์ร้อน, หนาวมาก, อบอ้าว, อุณหภูมิ
+3. "อาหารและเครื่องดื่ม" -> เรื่อง ป๊อปคอร์นไม่กรอบ, ป๊อปคอร์นเหนียว, เค็ม, น้ำอัดลมไม่มีงวด, อาหารเสีย, รออาหารนาน
+4. "ระบบฉายและเสียง" -> เรื่อง จอภาพเบลอ, ภาพดับ, เสียงเบา/ดังไป, ลำโพงแตก, ซับไตเติลหาย, หนังกระตุก
+5. "พนักงานและการบริการ" -> เรื่อง พนักงานพูดจาหยาบคาย, ชักสีหน้า, แถวยาว, คิดเงินผิด
+6. "ระบบตั๋วและแอปพลิเคชัน" -> เรื่อง จองตั๋วไม่ได้, ตัดเงินไม่ได้ตั๋ว, ตู้สแกนเสีย
+7. "พฤติกรรมลูกค้าท่านอื่น" -> เรื่อง คุยเสียงดัง, เล่นโทรศัพท์, เอาเท้าพาด
+8. "ทั่วไป / คำชม" -> คำชมเชย หรือ ข้อเสนอแนะทั่วไป
 
-[กฎการจำแนกหมวดหมู่ (category) - ห้ามสับสนเด็ดขาด]:
-1. "สภาพแวดล้อมและสถานที่ (อุณหภูมิ/แอร์)" -> เรื่องเกี่ยวกับ แอร์, หนาว, หนาวมาก, ร้อน, อบอ้าว, อุณหภูมิ (***ห้ามจัดหมวดนี้เข้าเรื่องระบบเสียงเด็ดขาด!***)
-2. "ความสะอาดและสถานที่" -> ห้องน้ำเหม็น, เบาะสกปรก, พื้นเหนียว, ขยะ
-3. "อาหารและเครื่องดื่ม" -> ป๊อปคอร์นไม่กรอบ, ป๊อปคอร์นเหนียว/เค็ม/เย็น, น้ำอัดลมไม่มีงวด, รอนาน, อาหารเสีย
-4. "ระบบฉายและเสียง" -> เฉพาะเรื่อง จอภาพ, ภาพเบลอ, สีเพี้ยน, เสียงเบา/ดังไป, ลำโพงแตก, หนังกระตุก, ซับไตเติลหาย
-5. "พนักงานและการบริการ" -> พูดจาไม่ดี, ชักสีหน้า, คิดเงินผิด, แถวยาว
-6. "ระบบตั๋วและแอปพลิเคชัน" -> จองตั๋วไม่ได้, ตู้ตั๋วเสีย, ตัดเงินไม่ได้ตั๋ว
-7. "พฤติกรรมลูกค้าท่านอื่น" -> คุยเสียงดัง, เล่นโทรศัพท์, เอาเท้าพาด
-8. "ทั่วไป / คำชม" -> คำชมเชยบริการ หรือ ข้อเสนอแนะทั่วไป
+[กฎเหล็ก Sentiment และ Action]:
+- หากเป็นคำบ่น ติ ปัญหา เช่น "ห้องน้ำเหม็น", "หนาวมาก", "ป๊อปคอร์นไม่กรอบ" -> sentiment ต้องเป็น "Negative" เท่านั้น!
+- คำแนะนำ (action_recommendation) ต้องสอดคล้องกับปัญหา เช่น ปัญหาห้องน้ำเหม็น คำแนะนำต้องเป็นการแจ้งแม่บ้าน/ทำความสะอาด (ห้ามเสนอให้เปลี่ยนอาหารเด็ดขาด)
 
-[ระดับความเร่งด่วน (urgency)]:
-- Critical: แอร์หนาวมาก/ร้อน/ดับ, หนังดับ/กระตุก/ภาพเสียงเสีย (กระทบการดูหนังทันที)
-- High: ตัดเงินไม่ได้ตั๋ว, พนักงานพูดจาหยาบคาย, กลิ่นเหม็นรุนแรง, สิ่งแปลกปลอมในอาหาร
-- Medium: ป๊อปคอร์นไม่กรอบ/เหนียว/ไม่อร่อย, แถวยาว, คนข้างๆ เสียงดัง
-- Low: คำชมเชย, ข้อเสนอแนะทั่วไป
-
-ตอบกลับเป็น JSON ภาษาไทย รูปแบบนี้เท่านั้น:
+ตอบเป็น JSON ภาษาไทย รูปแบบนี้เท่านั้น:
 {
   "sentiment": "Positive" | "Neutral" | "Negative",
   "urgency": "Low" | "Medium" | "High" | "Critical",
-  "category": "ชื่อหมวดหมู่ตามกฎด้านบน",
-  "summary": "สรุป 1 ประโยคสั้นๆ",
-  "action_recommendation": "คำแนะนำสั้นๆ ในการแก้ไขปัญหา"
+  "category": "ระบุหมวดหมู่ที่ตรงตามกฎข้างบน",
+  "summary": "สรุปปัญหาใน 1 ประโยค",
+  "action_recommendation": "คำแนะนำสั้นๆ ที่ตรงกับปัญหานั้นๆ"
 }`;
 
     try {
@@ -133,21 +149,21 @@ function getUrgencyText(urgency) {
 }
 
 /**
- * ฟังก์ชันส่งแจ้งเตือนผ่าน LINE Messaging API
+ * ฟังก์ชันส่งแจ้งเตือนผ่าน LINE Messaging API (Push Message)
  */
 async function sendLinePushAlert(customerText, name, phone, formattedDate, analysis) {
     const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
     const targetId = process.env.LINE_TARGET_ID;
 
     if (!channelToken || !targetId) {
-        console.error('❌ LINE Alert Error: ไม่พบ LINE_CHANNEL_ACCESS_TOKEN หรือ LINE_TARGET_ID');
+        console.error('❌ LINE Alert Error: ไม่พบ LINE_CHANNEL_ACCESS_TOKEN หรือ LINE_TARGET_ID ใน Environment Variables');
         return;
     }
 
     const urgencyTag = getUrgencyText(analysis.urgency);
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
 
-    const messageText = `📥 แจ้งเตือน Feedback 
+    const messageText = `📥 แจ้งเตือน Feedback ใหม่! (Cinema v4.0)
 
 👤 ผู้ส่งข้อมูล: ${customerInfo}
 
@@ -217,7 +233,7 @@ app.post('/api/feedback', async (req, res) => {
         // 1. วิเคราะห์ด้วย AI
         const analysis = await analyzeFeedbackWithAI(text);
 
-        // 2. ส่ง LINE Alert และรอให้ทำงานเสร็จก่อนจบ Request
+        // 2. ส่ง LINE Push Alert
         await sendLinePushAlert(text, name, phone, formattedDate, analysis);
 
         // 3. ตอบกลับหน้าเว็บ
@@ -232,7 +248,7 @@ app.post('/api/feedback', async (req, res) => {
     }
 });
 
-// Endpoint สำหรับ Webhook LINE Group ID
+// Endpoint สำหรับดึง Group ID ผ่าน Webhook
 app.post('/api/webhook', async (req, res) => {
     try {
         const events = req.body.events || [];
