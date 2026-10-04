@@ -1,87 +1,106 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import fetch from 'node-fetch';
-import { GoogleGenAI, Type } from '@google/genai';
 
 dotenv.config();
 
 const app = express();
 app.use(express.json());
 
-// เริ่มต้น Gemini Client (ระบุ API Key ผ่าน process.env.GEMINI_API_KEY)
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+/**
+ * ฟังก์ชันเรียก AI วิเคราะห์และประเมินสถานการณ์จาก Feedback
+ */
+async function analyzeFeedbackWithAI(customerText) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+        console.warn('⚠️ GEMINI_API_KEY ไม่ได้ถูกตั้งค่า ใช้ผลวิเคราะห์เริ่มต้นแทน');
+        return getDefaultAnalysis(customerText);
+    }
 
-// ฟังก์ชันวิเคราะห์ Feedback ด้วย Gemini AI (ส่งผลลัพธ์แบบ JSON Schema)
-async function analyzeFeedback(customerText) {
+    const prompt = `คุณคือระบบ AI วิเคราะห์ความคิดเห็นลูกค้าสำหรับธุรกิจร้านค้า/บริการ
+กรุณาวิเคราะห์ข้อความ Feedback ต่อไปนี้ แล้วตอบกลับในรูปแบบ JSON เท่านั้น (ไม่ต้องใส่ Markdown block หรือโค้ดอื่น):
+
+ข้อความลูกค้า: "${customerText}"
+
+รูปแบบโครงสร้าง JSON ที่ต้องการ:
+{
+  "sentiment": "Positive" | "Neutral" | "Negative",
+  "urgency": "Low" | "Medium" | "High" | "Critical",
+  "category": "การบริการ / อาหารหรือสินค้า / ความสะอาด / ราคา / สถานที่ / อื่นๆ",
+  "summary": "สรุปประเด็นสำคัญสั้นๆ ใน 1 ประโยค",
+  "action_recommendation": "คำแนะนำการดำเนินการแก้ไขหรือตอบสนองสำหรับผู้จัดการร้าน"
+}`;
+
     try {
-        const response = await ai.models.generateContent({
-            model: 'gemini-3.8-flash',
-            contents: `วิเคราะห์ข้อความ Feedback จากลูกค้าดังต่อไปนี้: "${customerText}"`,
-            config: {
-                systemInstruction: `คุณคือ AI วิเคราะห์ Feedback ลูกค้าของร้านค้า ให้ประเมินระดับ Sentiment (เชิงบวก/เชิงลบ/ปานกลาง), ความเร่งด่วน (Low/Normal/High/Urgent), หมวดหมู่เรื่องร้องเรียน/เสนอแนะ, สรุปใจความสำคัญ และคำแนะนำในการดำเนินการต่อ`,
-                responseMimeType: 'application/json',
-                responseSchema: {
-                    type: Type.OBJECT,
-                    properties: {
-                        sentiment: { 
-                            type: Type.STRING, 
-                            description: 'เช่น เชิงบวก (Positive), เชิงลบ (Negative), หรือ ปานกลาง (Neutral)' 
-                        },
-                        urgency: { 
-                            type: Type.STRING, 
-                            description: 'Low, Normal, High, หรือ Urgent' 
-                        },
-                        category: { 
-                            type: Type.STRING, 
-                            description: 'เช่น การบริการ, คุณภาพสินค้า, ความสะอาด, ราคา, หรือ ข้อเสนอแนะทั่วไป' 
-                        },
-                        summary: { 
-                            type: Type.STRING, 
-                            description: 'สรุปประเด็นหลักสั้นๆ ไม่เกิน 1-2 ประโยค' 
-                        },
-                        action_recommendation: { 
-                            type: Type.STRING, 
-                            description: 'คำแนะนำเบื้องต้นสำหรับผู้จัดการร้านในการรับมือหรือแก้ไขปัญหา' 
-                        }
-                    },
-                    required: ['sentiment', 'urgency', 'category', 'summary', 'action_recommendation']
-                }
+        const response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents: [{ parts: [{ text: prompt }] }],
+                    generationConfig: {
+                        responseMimeType: 'application/json'
+                    }
+                })
             }
-        });
+        );
 
-        return JSON.parse(response.text);
-    } catch (error) {
-        console.error('❌ AI Analysis Error:', error);
-        // หาก AI ขัดข้อง ให้ใช้ค่า Default เพื่อไม่ให้ระบบล่ม
-        return {
-            sentiment: 'ไม่สามารถวิเคราะห์ได้',
-            urgency: 'Normal',
-            category: 'ข้อเสนอแนะทั่วไป',
-            summary: customerText,
-            action_recommendation: 'ตรวจสอบข้อความโดยตรง'
-        };
+        const data = await response.json();
+        const aiText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+
+        if (aiText) {
+            return JSON.parse(aiText);
+        } else {
+            console.error('❌ AI Response Format Error:', data);
+            return getDefaultAnalysis(customerText);
+        }
+    } catch (err) {
+        console.error('❌ AI Analysis Error:', err);
+        return getDefaultAnalysis(customerText);
+    }
+}
+
+// ค่าเริ่มต้นกรณีเรียก AI ไม่สำเร็จ
+function getDefaultAnalysis(text) {
+    return {
+        sentiment: 'Neutral',
+        urgency: 'Medium',
+        category: 'ทั่วไป',
+        summary: text,
+        action_recommendation: 'ตรวจสอบข้อความและพิจารณาดำเนินการตามความเหมาะสม'
+    };
+}
+
+// ฟังก์ชันแปลงระดับความเร่งด่วนเป็น Emoji
+function getUrgencyEmoji(urgency) {
+    switch (urgency) {
+        case 'Critical': return '🚨🚨 *CRITICAL*';
+        case 'High': return '🔴 *HIGH*';
+        case 'Medium': return '🟠 *MEDIUM*';
+        case 'Low': return '🟢 *LOW*';
+        default: return '⚪ *NORMAL*';
     }
 }
 
 // ฟังก์ชันส่งแจ้งเตือนเข้า Telegram
-async function sendTelegramAlert(customerText, formattedDate, aiAnalysis) {
+async function sendTelegramAlert(customerText, formattedDate, analysis) {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     const chatId = process.env.TELEGRAM_CHAT_ID;
 
-    // เลือก Emoji กำหนดความเร่งด่วน
-    const urgencyEmoji = aiAnalysis.urgency === 'Urgent' || aiAnalysis.urgency === 'High' ? '🔴' : '🟢';
+    const urgencyTag = getUrgencyEmoji(analysis.urgency);
 
-    const message = `🚨 *แจ้งเตือน Feedback ใหม่จากลูกค้า!*
+    const message = `📥 *แจ้งเตือน Feedback ใหม่จากลูกค้า!*
 
-📌 *ข้อความที่ได้รับ:*
+📌 *ข้อความที่ได้รับ:* 
 "${customerText}"
 
 🤖 *ผลการวิเคราะห์โดย AI:*
-• *Sentiment:* ${aiAnalysis.sentiment}
-• *ระดับความเร่งด่วน:* ${urgencyEmoji} ${aiAnalysis.urgency}
-• *หมวดหมู่:* ${aiAnalysis.category}
-• *สรุปประเด็น:* ${aiAnalysis.summary}
-💡 *คำแนะนำการดำเนินการ:* ${aiAnalysis.action_recommendation}
+• *ความรู้สึก:* ${analysis.sentiment}
+• *ระดับความเร่งด่วน:* ${urgencyTag}
+• *หมวดหมู่:* ${analysis.category}
+• *สรุปประเด็น:* ${analysis.summary}
+💡 *คำแนะนำการดำเนินการ:* ${analysis.action_recommendation}
 
 📅 *วันที่และเวลา:* ${formattedDate}
 📍 *สถานที่:* สาขากาฬสินธุ์`;
@@ -127,16 +146,16 @@ app.post('/api/feedback', async (req, res) => {
             hour12: false
         }) + ' น.';
 
-        // 1. วิเคราะห์ข้อมูลด้วย AI
-        const aiAnalysis = await analyzeFeedback(text);
+        // 1. ส่งให้ AI วิเคราะห์ปัญหาก่อน
+        const analysis = await analyzeFeedbackWithAI(text);
 
-        // 2. ส่งแจ้งเตือนพร้อมผลวิเคราะห์เข้า Telegram
-        await sendTelegramAlert(text, formattedDate, aiAnalysis);
+        // 2. ส่งข้อมูลแจ้งเตือน Telegram พร้อมผลวิเคราะห์ AI
+        await sendTelegramAlert(text, formattedDate, analysis);
 
-        // 3. ตอบกลับ API ด้วยข้อมูลจริงจาก AI
+        // 3. ตอบกลับ API Response
         res.json({
             success: true,
-            analysis: aiAnalysis
+            analysis: analysis
         });
 
     } catch (error) {
