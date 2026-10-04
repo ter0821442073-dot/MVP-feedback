@@ -147,7 +147,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
     const urgencyTag = getUrgencyText(analysis.urgency);
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
 
-    const messageText = `📥 แจ้งเตือน Feedback ใหม่! (Cinema v3.9)
+    const messageText = `📥 แจ้งเตือน Feedback 
 
 👤 ผู้ส่งข้อมูล: ${customerInfo}
 
