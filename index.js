@@ -7,62 +7,81 @@ const app = express();
 app.use(express.json());
 
 /**
- * 1. ฟังก์ชันกรองและปรับปรุงผลลัพธ์ขั้นสุดท้าย (Post-Processing Guardrail)
- * ป้องกัน AI / Keyword ประมวลผลพลาด 100%
+ * 1. ฟังก์ชัน Guardrail ขั้นสูงสุด (Post-Processing Guardrail v5.1)
+ * ตรวจสอบกริยาเชิงลบของพนักงาน เช่น ตะคอก, ด่า, ตะโกน, ชักสีหน้า
  */
 function applyGuardrail(analysis, text) {
     const textLower = text.toLowerCase();
 
     // รายการคำชมเชยชัดเจน
     const positiveKeywords = ['ดีมาก', 'ดีเยี่ยม', 'ประทับใจ', 'ชมเชย', 'สุดยอด', 'น่ารัก', 'ยิ้มแย้ม', 'พูดจาดี', 'สะอาดมาก', 'หอม', 'อร่อย', 'บริการดี'];
-    // รายการคำร้องเรียน/ปัญหาชัดเจน
-    const negativeKeywords = ['ไม่ดี', 'แย่', 'ห่วย', 'ช้า', 'พัง', 'เสีย', 'เหม็น', 'สกปรก', 'หนาว', 'ร้อน', 'อบอ้าว', 'ไม่กรอบ', 'เหนียว', 'เค็ม', 'ด่า', 'กระตุก', 'ดับ', 'ขึ้นเสียง', 'หน้าบึ้ง', 'ไม่ยิ้ม', 'ไม่ฉาย'];
+    
+    // รายการคำร้องเรียน / กริยาเชิงลบ (รวม "ตะคอก", "ด่า", "ตะโกน", "ขึ้นเสียง")
+    const negativeKeywords = [
+        'ตะคอก', 'ตะโกน', 'ด่า', 'ขึ้นเสียง', 'หน้าบึ้ง', 'ชักสีหน้า', 'ไม่ยิ้ม', 'พูดจาแย่', 'พูดจาหยาบคาย', 
+        'มารยาทแย่', 'มารยาทไม่ดี', 'บริการแย่', 'บริการห่วย', 'ไม่ดี', 'แย่', 'ห่วย', 'ช้า', 'พัง', 'เสีย', 
+        'เหม็น', 'สกปรก', 'หนาว', 'ร้อน', 'อบอ้าว', 'ไม่กรอบ', 'เหนียว', 'เค็ม', 'กระตุก', 'ดับ', 'ไม่ฉาย'
+    ];
 
     const hasPositive = positiveKeywords.some(k => textLower.includes(k));
     const hasNegative = negativeKeywords.some(k => textLower.includes(k));
 
-    // กฎเหล็กที่ 1: ถ้ามีคำชมและไม่มีคำติ -> บังคับ Positive + Urgency Low + คำแนะนำเชิงบวก
+    // กฎที่ 1: ตรวจพบกริยาเชิงลบของพนักงาน (เช่น ตะคอก, ด่า, ชักสีหน้า) -> บังคับ Negative + High + ตักเตือน
+    const isStaffIssue = ['พนักงาน', 'บริการ', 'ตะคอก', 'ตะโกน', 'ด่า', 'ขึ้นเสียง', 'หน้าบึ้ง', 'ชักสีหน้า', 'ไม่ยิ้ม', 'พูดจาหยาบคาย', 'มารยาท'].some(k => textLower.includes(k));
+    if (isStaffIssue && hasNegative) {
+        analysis.sentiment = 'Negative';
+        analysis.urgency = 'High';
+        analysis.category = 'พนักงานและการบริการ';
+        analysis.action_recommendation = 'ประสานงานผู้จัดการสาขาตรวจสอบและดำเนินการตักเตือน/ปรับปรุงพฤติกรรมการให้บริการของพนักงานด่วน';
+        return analysis;
+    }
+
+    // กฎที่ 2: มีแต่คำชมเชย -> บังคับ Positive + Low
     if (hasPositive && !hasNegative) {
         analysis.sentiment = 'Positive';
         analysis.urgency = 'Low';
 
-        if (analysis.category === 'พนักงานและการบริการ' || textLower.includes('พนักงาน') || textLower.includes('บริการ')) {
+        if (isStaffIssue) {
             analysis.category = 'พนักงานและการบริการ';
             analysis.action_recommendation = 'ส่งคำชมเชยไปยังพนักงานและผู้จัดการสาขาเพื่อเป็นกำลังใจในการทำงาน';
-        } else if (textLower.includes('ป๊อปคอร์น') || textLower.includes('อาหาร') || textLower.includes('อร่อย')) {
+        } else if (['ป๊อปคอร์น', 'อาหาร', 'อร่อย', 'ขนม'].some(k => textLower.includes(k))) {
             analysis.category = 'อาหารและเครื่องดื่ม';
             analysis.action_recommendation = 'ชื่นชมทีมเคาน์เตอร์อาหารและรักษาคุณภาพสินค้าต่อไป';
         } else {
             analysis.action_recommendation = 'ขอบคุณสำหรับคำชมเชย และจะรักษามาตรฐานการบริการที่ดีต่อไป';
         }
+        return analysis;
     }
 
-    // กฎเหล็กที่ 2: เรื่องหนังไม่ฉาย / จอดำ / ไฟดับ -> บังคับ Critical + Negative
+    // กฎที่ 3: หนังไม่ฉาย / จอดำ / ไฟดับ -> บังคับ Critical + Negative
     if (['หนังไม่ฉาย', 'ไม่ฉาย', 'จอดำ', 'ไม่มีเสียง', 'ไฟดับ'].some(k => textLower.includes(k))) {
         analysis.sentiment = 'Negative';
         analysis.urgency = 'Critical';
         analysis.category = 'ระบบฉายและเสียง';
         analysis.action_recommendation = '🚨 แจ้งช่างเทคนิคและผู้จัดการโรงภาพยนตร์เข้าตรวจสอบห้องควบคุมการฉาย (Projection Room) ทันที!';
+        return analysis;
     }
 
-    // กฎเหล็กที่ 3: แอร์หนาว / ร้อน -> บังคับ ระบบปรับอากาศ
+    // กฎที่ 4: แอร์หนาว / ร้อน -> บังคับ ระบบปรับอากาศ
     if (['แอร์', 'หนาว', 'ร้อน', 'อบอ้าว'].some(k => textLower.includes(k)) && !textLower.includes('เสียง')) {
         analysis.category = 'ระบบปรับอากาศ (แอร์)';
-        if (hasNegative || textLower.includes('หนาว') || textLower.includes('ร้อน')) {
+        if (hasNegative || ['หนาว', 'ร้อน', 'อบอ้าว'].some(k => textLower.includes(k))) {
             analysis.sentiment = 'Negative';
             analysis.urgency = 'Critical';
             analysis.action_recommendation = 'ประสานงานช่างอาคารเข้าตรวจสอบและปรับอุณหภูมิเครื่องปรับอากาศด่วน';
         }
+        return analysis;
     }
 
-    // กฎเหล็กที่ 4: ห้องน้ำ / ความสะอาด -> บังคับ ความสะอาดและสถานที่
+    // กฎที่ 5: ห้องน้ำ / ความสะอาด -> บังคับ ความสะอาดและสถานที่
     if (['ห้องน้ำ', 'เหม็น', 'สกปรก', 'ขยะ'].some(k => textLower.includes(k))) {
         analysis.category = 'ความสะอาดและสถานที่';
-        if (hasNegative || textLower.includes('เหม็น') || textLower.includes('สกปรก')) {
+        if (hasNegative || ['เหม็น', 'สกปรก'].some(k => textLower.includes(k))) {
             analysis.sentiment = 'Negative';
             analysis.urgency = 'High';
             analysis.action_recommendation = 'แจ้งแม่บ้าน/ทีมทำความสะอาดเข้าตรวจสอบและจัดการความสะอาดทันที';
         }
+        return analysis;
     }
 
     return analysis;
@@ -75,13 +94,12 @@ function getDefaultAnalysis(text) {
     const textLower = text.toLowerCase();
 
     const isPositive = ['ดีมาก', 'ดีเยี่ยม', 'ประทับใจ', 'ชมเชย', 'สุดยอด', 'สะอาด', 'หอม', 'กรอบ', 'พูดจาดี', 'ยิ้มแย้ม', 'น่ารัก'].some(k => textLower.includes(k));
-    const isNegative = ['ไม่ดี', 'แย่', 'ห่วย', 'ช้า', 'พัง', 'เสีย', 'เหม็น', 'สกปรก', 'หนาว', 'ร้อน', 'อบอ้าว', 'ไม่กรอบ', 'เหนียว', 'เค็ม', 'ด่า', 'กระตุก', 'ดับ', 'ขึ้นเสียง', 'หน้าบึ้ง', 'ไม่ยิ้ม', 'ไม่ฉาย'].some(k => textLower.includes(k));
+    const isNegative = ['ตะคอก', 'ตะโกน', 'ด่า', 'ขึ้นเสียง', 'หน้าบึ้ง', 'ชักสีหน้า', 'ไม่ยิ้ม', 'ไม่ดี', 'แย่', 'ห่วย', 'ช้า', 'พัง', 'เสีย', 'เหม็น', 'สกปรก', 'หนาว', 'ร้อน', 'อบอ้าว', 'ไม่กรอบ', 'เหนียว', 'เค็ม', 'กระตุก', 'ดับ', 'ไม่ฉาย'].some(k => textLower.includes(k));
 
     let category = 'ทั่วไป / คำชม';
     let action = 'ขอบคุณสำหรับข้อเสนอแนะ และจะนำไปพัฒนาปรับปรุงการให้บริการต่อไป';
-    let urgency = 'Low';
 
-    if (textLower.includes('พนักงาน') || textLower.includes('บริการ')) {
+    if (['พนักงาน', 'บริการ', 'ตะคอก', 'ด่า', 'ขึ้นเสียง'].some(k => textLower.includes(k))) {
         category = 'พนักงานและการบริการ';
     } else if (['ห้องน้ำ', 'เหม็น', 'สกปรก', 'ขยะ'].some(k => textLower.includes(k))) {
         category = 'ความสะอาดและสถานที่';
@@ -95,7 +113,7 @@ function getDefaultAnalysis(text) {
 
     let result = {
         sentiment: isPositive && !isNegative ? 'Positive' : isNegative ? 'Negative' : 'Neutral',
-        urgency: isNegative ? 'Medium' : 'Low',
+        urgency: isNegative ? 'High' : 'Low',
         category: category,
         summary: text,
         action_recommendation: action
@@ -116,19 +134,17 @@ async function analyzeFeedbackWithAI(customerText) {
     const promptText = `คุณคือ AI วิเคราะห์ความคิดเห็นลูกค้าสำหรับโรงภาพยนตร์
 วิเคราะห์ข้อความนี้: "${customerText}"
 
+[กฎเหล็กกริยาพนักงาน]:
+- หากมีคำว่า "ตะคอก", "ด่า", "ตะโกน", "ขึ้นเสียงใส่", "ชักสีหน้า", "หน้าบึ้ง", "พูดจาไม่ดี" -> บังคับ sentiment: "Negative", urgency: "High", category: "พนักงานและการบริการ" เท่านั้น!
+
 [หมวดหมู่ (category)]:
-- "พนักงานและการบริการ": เรื่องพนักงาน, การบริการ, คำชมพนักงาน, พนักงานพูดจาไม่ดี, ขึ้นเสียง
+- "พนักงานและการบริการ": เรื่องพนักงาน, การบริการ, คำชมพนักงาน, ตะคอก, ขึ้นเสียง, ชักสีหน้า
 - "ระบบปรับอากาศ (แอร์)": เรื่องแอร์, หนาว, ร้อน, อบอ้าว
 - "ความสะอาดและสถานที่": เรื่องห้องน้ำ, กลิ่นเหม็น, สกปรก, ขยะ
 - "อาหารและเครื่องดื่ม": เรื่องป๊อปคอร์น, น้ำ, ขนม, ไม่กรอบ, อร่อย
 - "ระบบฉายและเสียง": เรื่องหนังไม่ฉาย, จอดำ, ภาพเบลอ, เสียงเบา/ดัง, ลำโพง
 - "ระบบตั๋วและแอปพลิเคชัน": เรื่องจองตั๋ว, แอป, ตู้สแกน
 - "ทั่วไป / คำชม": ข้อเสนอแนะทั่วไป
-
-[Sentiment]:
-- คำชม (เช่น "บริการดีมาก", "ป๊อปคอร์นอร่อย") -> Positive
-- คำติ/ปัญหา (เช่น "ห้องน้ำเหม็น", "หนาวมาก", "พนักงานไม่ยิ้ม") -> Negative
-- ทั่วไป -> Neutral
 
 ตอบเป็น JSON ภาษาไทย รูปแบบนี้เท่านั้น:
 {
@@ -158,8 +174,6 @@ async function analyzeFeedbackWithAI(customerText) {
         if (!jsonMatch) return getDefaultAnalysis(customerText);
 
         let parsed = JSON.parse(jsonMatch[0]);
-        
-        // ส่งผลลัพธ์ผ่าน Guardrail เพื่อสกรีนความถูกต้อง 100%
         return applyGuardrail(parsed, customerText);
 
     } catch (err) {
@@ -189,7 +203,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
     const urgencyTag = getUrgencyText(analysis.urgency);
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
 
-    const messageText = `📥 แจ้งเตือน Feedback ใหม่! (Cinema v5.0)
+    const messageText = `📥 แจ้งเตือน Feedback ใหม่! (Cinema v5.1)
 
 👤 ผู้ส่งข้อมูล: ${customerInfo}
 
