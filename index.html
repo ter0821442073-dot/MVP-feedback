@@ -67,4 +67,42 @@
         }
     </script>
 </body>
-</html>
+</html><!-- ช่องกรอกข้อมูลผู้ใช้งาน -->
+<input type="text" id="userName" placeholder="ชื่อของคุณ (เช่น คุณสมชาย)" />
+<input type="tel" id="userPhone" placeholder="เบอร์โทรศัพท์ (เผื่อให้เจ้าหน้าที่ติดต่อกลับ)" />
+
+<!-- ช่องกรอก Feedback -->
+<textarea id="feedbackText" placeholder="พิมพ์ข้อความ Feedback ที่นี่..."></textarea>
+<button onclick="submitFeedback()">ส่งข้อความ</button>
+
+<script>
+  // โหลดข้อมูลเดิมที่เคยกรอกไว้ให้อัตโนมัติ (ถ้ามี)
+  document.getElementById('userName').value = localStorage.getItem('user_name') || '';
+  document.getElementById('userPhone').value = localStorage.getItem('user_phone') || '';
+
+  async function submitFeedback() {
+    const text = document.getElementById('feedbackText').value;
+    const name = document.getElementById('userName').value;
+    const phone = document.getElementById('userPhone').value;
+
+    if (!text) {
+      alert('กรุณากรอกข้อความก่อนส่งครับ');
+      return;
+    }
+
+    // บันทึกชื่อและเบอร์ไว้ในเครื่อง เพื่อใช้ครั้งต่อไปโดยไม่ต้องพิมพ์ซ้ำ
+    localStorage.setItem('user_name', name);
+    localStorage.setItem('user_phone', phone);
+
+    const response = await fetch('/api/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, name, phone })
+    });
+
+    const result = await response.json();
+    if (result.success) {
+      alert('ส่งข้อมูลเรียบร้อยแล้ว ขอบคุณสำหรับ Feedback ครับ!');
+    }
+  }
+</script>

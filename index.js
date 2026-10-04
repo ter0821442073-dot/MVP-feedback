@@ -7,7 +7,7 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// ค่าเริ่มต้นกรณี AI ล้มเหลว (Fallback)
+// ค่าเริ่มต้นกรณีเรียก AI ไม่สำเร็จ
 function getDefaultAnalysis(text) {
     const textLower = text.toLowerCase();
     const isCritical = ['ร้อน', 'แอร์', 'อบอ้าว', 'พัง', 'เสีย', 'เหม็น', 'ช้ามาก', 'ห่วย'].some(k => textLower.includes(k));
@@ -24,12 +24,11 @@ function getDefaultAnalysis(text) {
 }
 
 /**
- * ฟังก์ชันเรียก AI วิเคราะห์แบบ Safe Wrapper (ไม่มีทางทำให้ Server Crash)
+ * ฟังก์ชันเรียก AI วิเคราะห์ Feedback
  */
 async function analyzeFeedbackWithAI(customerText) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-        console.warn('⚠️️ GEMINI_API_KEY ไม่ได้ถูกตั้งค่า');
         return getDefaultAnalysis(customerText);
     }
 
@@ -50,9 +49,8 @@ async function analyzeFeedbackWithAI(customerText) {
 }`;
 
     try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
 
-        // ตั้ง Timeout ไว้ 5 วินาที ถ้า AI ตอบช้า ให้ตัดไปใช้ Fallback ทันที
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 5000);
 
@@ -67,17 +65,13 @@ async function analyzeFeedbackWithAI(customerText) {
 
         clearTimeout(timeoutId);
 
-        if (!response.ok) {
-            console.error('❌ AI Status Error:', response.status);
-            return getDefaultAnalysis(customerText);
-        }
+        if (!response.ok) return getDefaultAnalysis(customerText);
 
         const data = await response.json();
         const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
 
         if (!rawText) return getDefaultAnalysis(customerText);
 
-        // ดึงเฉพาะส่วนที่เป็น JSON ออกมาจาก Response
         const jsonMatch = rawText.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
             return JSON.parse(jsonMatch[0]);
@@ -86,12 +80,10 @@ async function analyzeFeedbackWithAI(customerText) {
         return getDefaultAnalysis(customerText);
 
     } catch (err) {
-        console.error('❌ AI Analysis Failed/Timeout:', err.message);
         return getDefaultAnalysis(customerText);
     }
 }
 
-// แปลงระดับความเร่งด่วน
 function getUrgencyText(urgency) {
     switch (urgency) {
         case 'Critical': return '🚨🚨 CRITICAL (ด่วนที่สุด)';
@@ -102,19 +94,21 @@ function getUrgencyText(urgency) {
     }
 }
 
-// ฟังก์ชันส่ง Telegram (ใช้ระบบ Plain Text แบบของคุณที่รันผ่านปกติ)
-async function sendTelegramAlert(customerText, formattedDate, analysis) {
+/**
+ * ฟังก์ชันส่ง Telegram Alert เพิ่มการระบุตัวตนของผู้ส่ง
+ */
+async function sendTelegramAlert(customerText, name, phone, formattedDate, analysis) {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     const chatId = process.env.TELEGRAM_CHAT_ID;
 
-    if (!token || !chatId) {
-        console.error('❌ Missing Telegram ENV');
-        return;
-    }
+    if (!token || !chatId) return;
 
     const urgencyTag = getUrgencyText(analysis.urgency);
+    const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
 
     const message = `📥 แจ้งเตือน Feedback ใหม่จากลูกค้า!
+
+👤 ผู้ส่งข้อมูล: ${customerInfo}
 
 📌 ข้อความที่ได้รับ:
 "${customerText}"
@@ -130,7 +124,7 @@ async function sendTelegramAlert(customerText, formattedDate, analysis) {
 📍 สถานที่: สาขากาฬสินธุ์`;
 
     try {
-        const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -138,22 +132,16 @@ async function sendTelegramAlert(customerText, formattedDate, analysis) {
                 text: message
             })
         });
-
-        const data = await response.json();
-        if (!data.ok) {
-            console.error('❌ Telegram Send Failed:', data);
-        } else {
-            console.log('✅ Telegram Sent Successfully!');
-        }
     } catch (err) {
-        console.error('❌ Telegram Network Error:', err);
+        console.error('❌ Telegram Send Error:', err);
     }
 }
 
-// Endpoint รับข้อความหน้าร้าน
+// Endpoint รับข้อมูล Feedback
 app.post('/api/feedback', async (req, res) => {
     try {
-        const { text } = req.body;
+        // รับค่า name และ phone เพิ่มเติม
+        const { text, name, phone } = req.body;
 
         if (!text) {
             return res.status(400).json({ error: 'กรุณากรอกข้อความ Feedback' });
@@ -171,13 +159,13 @@ app.post('/api/feedback', async (req, res) => {
             hour12: false
         }) + ' น.';
 
-        // 1. วิเคราะห์ด้วย AI (มี Timeout 5 วินาที ถ้า AI พัง/ตอบช้า จะดึงค่า Fallback ทันที)
+        // 1. วิเคราะห์ด้วย AI
         const analysis = await analyzeFeedbackWithAI(text);
 
-        // 2. ส่ง Telegram ทันที
-        await sendTelegramAlert(text, formattedDate, analysis);
+        // 2. ส่ง Telegram พร้อมข้อมูลชื่อและเบอร์โทร
+        await sendTelegramAlert(text, name, phone, formattedDate, analysis);
 
-        // 3. ส่งข้อมูลกลับหน้าเว็บ
+        // 3. ตอบกลับหน้าเว็บ
         return res.json({
             success: true,
             analysis: analysis
