@@ -183,18 +183,41 @@ app.post('/api/feedback', async (req, res) => {
     }
 });// ... โค้ดเดิมของคุณด้านบน ...
 
-// 📌 เพิ่มโค้ดส่วนนี้เข้าไป
-app.post('/api/webhook', (req, res) => {
-    const events = req.body.events || [];
-    events.forEach(event => {
-        if (event.source && event.source.groupId) {
-            console.log('📌 =====================================');
-            console.log('✅ ได้รับ GROUP ID แล้ว:');
-            console.log(event.source.groupId);
-            console.log('📌 =====================================');
+/// Endpoint สำหรับดึง Group ID โดยตอบกลับในแชทกลุ่มทันที
+app.post('/api/webhook', async (req, res) => {
+    try {
+        const events = req.body.events || [];
+        
+        for (const event of events) {
+            // ตรวจจับเมื่อมีคนพิมพ์ข้อความในกลุ่ม
+            if (event.type === 'message' && event.message.type === 'text') {
+                const groupId = event.source.groupId;
+                const replyToken = event.replyToken;
+
+                // ถ้ามี groupId (ส่งมาจากในกลุ่ม) ให้บอทตอบกลับทันที
+                if (groupId && replyToken) {
+                    await fetch('https://api.line.me/v2/bot/message/reply', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`
+                        },
+                        body: JSON.stringify({
+                            replyToken: replyToken,
+                            messages: [{
+                                type: 'text',
+                                text: `📌 Group ID ของกลุ่มนี้คือ:\n${groupId}`
+                            }]
+                        })
+                    });
+                }
+            }
         }
-    });
-    return res.status(200).send('OK');
+        return res.status(200).send('OK');
+    } catch (err) {
+        console.error(err);
+        return res.status(200).send('OK');
+            }
 });
 
 // ... โค้ดเดิมของคุณด้านล่าง เช่น export default app; ...
