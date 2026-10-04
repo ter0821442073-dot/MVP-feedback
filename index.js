@@ -7,7 +7,7 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// ค่าเริ่มต้นกรณีเรียก AI ไม่สำเร็จ
+// ค่าเริ่มต้นกรณี AI ล้มเหลว
 function getDefaultAnalysis(text) {
     const textLower = text.toLowerCase();
     const isCritical = ['ร้อน', 'แอร์', 'อบอ้าว', 'พัง', 'เสีย', 'เหม็น', 'ช้ามาก', 'ห่วย'].some(k => textLower.includes(k));
@@ -23,14 +23,10 @@ function getDefaultAnalysis(text) {
     };
 }
 
-/**
- * ฟังก์ชันเรียก AI วิเคราะห์ Feedback
- */
+// ฟังก์ชันเรียก AI วิเคราะห์
 async function analyzeFeedbackWithAI(customerText) {
     const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-        return getDefaultAnalysis(customerText);
-    }
+    if (!apiKey) return getDefaultAnalysis(customerText);
 
     const promptText = `คุณคือ AI วิเคราะห์ความคิดเห็นลูกค้า
 กรุณาวิเคราะห์ข้อความนี้: "${customerText}"
@@ -50,7 +46,6 @@ async function analyzeFeedbackWithAI(customerText) {
 
     try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
-
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 5000);
 
@@ -58,26 +53,18 @@ async function analyzeFeedbackWithAI(customerText) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             signal: controller.signal,
-            body: JSON.stringify({
-                contents: [{ parts: [{ text: promptText }] }]
-            })
+            body: JSON.stringify({ contents: [{ parts: [{ text: promptText }] }] })
         });
 
         clearTimeout(timeoutId);
-
         if (!response.ok) return getDefaultAnalysis(customerText);
 
         const data = await response.json();
         const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-
         if (!rawText) return getDefaultAnalysis(customerText);
 
         const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-            return JSON.parse(jsonMatch[0]);
-        }
-
-        return getDefaultAnalysis(customerText);
+        return jsonMatch ? JSON.parse(jsonMatch[0]) : getDefaultAnalysis(customerText);
 
     } catch (err) {
         return getDefaultAnalysis(customerText);
@@ -95,18 +82,21 @@ function getUrgencyText(urgency) {
 }
 
 /**
- * ฟังก์ชันส่ง Telegram Alert เพิ่มการระบุตัวตนของผู้ส่ง
+ * ฟังก์ชันส่งแจ้งเตือนผ่าน LINE Messaging API (Push Message)
  */
-async function sendTelegramAlert(customerText, name, phone, formattedDate, analysis) {
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    const chatId = process.env.TELEGRAM_CHAT_ID;
+async function sendLinePushAlert(customerText, name, phone, formattedDate, analysis) {
+    const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+    const targetId = process.env.LINE_TARGET_ID; // สามารถเป็น User ID หรือ Group ID ได้
 
-    if (!token || !chatId) return;
+    if (!channelToken || !targetId) {
+        console.warn('⚠️ ไม่พบ LINE_CHANNEL_ACCESS_TOKEN หรือ LINE_TARGET_ID ในระบบ');
+        return;
+    }
 
     const urgencyTag = getUrgencyText(analysis.urgency);
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
 
-    const message = `📥 แจ้งเตือน Feedback ใหม่จากลูกค้า!
+    const messageText = `📥 แจ้งเตือน Feedback ใหม่!
 
 👤 ผู้ส่งข้อมูล: ${customerInfo}
 
@@ -118,29 +108,43 @@ async function sendTelegramAlert(customerText, name, phone, formattedDate, analy
 • ระดับความเร่งด่วน: ${urgencyTag}
 • หมวดหมู่: ${analysis.category}
 • สรุปประเด็น: ${analysis.summary}
-💡 คำแนะนำการดำเนินการ: ${analysis.action_recommendation}
+💡 คำแนะนำ: ${analysis.action_recommendation}
 
 📅 วันที่และเวลา: ${formattedDate}
 📍 สถานที่: สาขากาฬสินธุ์`;
 
     try {
-        await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        const response = await fetch('https://api.line.me/v2/bot/message/push', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${channelToken}`
+            },
             body: JSON.stringify({
-                chat_id: chatId,
-                text: message
+                to: targetId,
+                messages: [
+                    {
+                        type: 'text',
+                        text: messageText
+                    }
+                ]
             })
         });
+
+        const data = await response.json();
+        if (response.ok) {
+            console.log('✅ ส่งแจ้งเตือนผ่าน LINE Messaging API สำเร็จ!');
+        } else {
+            console.error('❌ LINE API Error:', data);
+        }
     } catch (err) {
-        console.error('❌ Telegram Send Error:', err);
+        console.error('❌ LINE Network Error:', err);
     }
 }
 
 // Endpoint รับข้อมูล Feedback
 app.post('/api/feedback', async (req, res) => {
     try {
-        // รับค่า name และ phone เพิ่มเติม
         const { text, name, phone } = req.body;
 
         if (!text) {
@@ -162,10 +166,12 @@ app.post('/api/feedback', async (req, res) => {
         // 1. วิเคราะห์ด้วย AI
         const analysis = await analyzeFeedbackWithAI(text);
 
-        // 2. ส่ง Telegram พร้อมข้อมูลชื่อและเบอร์โทร
-        await sendTelegramAlert(text, name, phone, formattedDate, analysis);
+        // 2. ส่งแจ้งเตือนผ่าน LINE Messaging API
+        sendLinePushAlert(text, name, phone, formattedDate, analysis).catch(err => 
+            console.error('❌ LINE Async Error:', err)
+        );
 
-        // 3. ตอบกลับหน้าเว็บ
+        // 3. ตอบกลับหน้าเว็บทันที
         return res.json({
             success: true,
             analysis: analysis
