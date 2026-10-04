@@ -17,25 +17,21 @@ async function analyzeFeedbackWithAI(customerText) {
         return getDefaultAnalysis(customerText);
     }
 
-    const systemInstruction = `คุณคือระบบ AI ประเมินวิเคราะห์ Feedback ของลูกค้าสำหรับโรงภาพยนตร์/สถานที่บริการ 
-กฎเหล็กในการวิเคราะห์:
-1. หากลูกค้าบ่นเรื่อง "ความร้อน", "แอร์ไม่เย็น", "กลิ่นเหม็น", "สิ่งสกปรก", "อาหารเสีย", "อุปกรณ์พัง/เสีย" ต้องประเมินเป็น:
-   - sentiment: "Negative"
-   - urgency: "Critical"
-2. หากลูกค้าชมเรื่องบริการ พนักงาน หรือสิ่งอำนวยความสะดวก:
-   - sentiment: "Positive"
-   - urgency: "Low"
-3. ต้องตอบกลับเฉพาะรูปแบบ JSON ภาษาไทยตรงตามโครงสร้างที่กำหนดเท่านั้น ห้ามมีข้อความอื่น`;
+    const prompt = `คุณคือระบบ AI วิเคราะห์ความพึงพอใจลูกค้า ให้วิเคราะห์ข้อความด้านล่างแล้วตอบกลับเป็น JSON ภาษาไทยเท่านั้น:
 
-    const prompt = `วิเคราะห์ข้อความนี้: "${customerText}"
+ข้อความลูกค้า: "${customerText}"
 
-ส่งคืนค่าในรูปแบบ JSON ดังนี้:
+กฎการวิเคราะห์:
+- ถ้าบ่นเรื่อง ความร้อน, แอร์ไม่เย็น, กลิ่นเหม็น, อาหารเสีย, สิ่งสกปรก ให้ sentiment = "Negative" และ urgency = "Critical"
+- ถ้าชมพนักงาน หรือบริการ ให้ sentiment = "Positive" และ urgency = "Low"
+
+รูปแบบ JSON ที่ต้องการ:
 {
   "sentiment": "Positive" | "Neutral" | "Negative",
   "urgency": "Low" | "Medium" | "High" | "Critical",
-  "category": "หมวดหมู่ปัญหาหรือคำชม",
-  "summary": "สรุปประเด็นสั้นๆ ใน 1 ประโยค",
-  "action_recommendation": "ข้อเสนอแนะการดำเนินการแก้ไขสำหรับผู้จัดการ"
+  "category": "หมวดหมู่ปัญหา",
+  "summary": "สรุปประเด็นสั้นๆ 1 ประโยค",
+  "action_recommendation": "คำแนะนำสำหรับผู้จัดการร้าน"
 }`;
 
     try {
@@ -45,9 +41,6 @@ async function analyzeFeedbackWithAI(customerText) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                systemInstruction: {
-                    parts: [{ text: systemInstruction }]
-                },
                 contents: [{ parts: [{ text: prompt }] }],
                 generationConfig: {
                     responseMimeType: 'application/json'
@@ -58,7 +51,7 @@ async function analyzeFeedbackWithAI(customerText) {
         const data = await response.json();
 
         if (!response.ok) {
-            console.error('❌ Gemini API Response Error:', data);
+            console.error('❌ Gemini API Error Status:', response.status, data);
             return getDefaultAnalysis(customerText);
         }
 
@@ -68,11 +61,11 @@ async function analyzeFeedbackWithAI(customerText) {
             const cleanJsonText = aiText.replace(/```json/g, '').replace(/```/g, '').trim();
             return JSON.parse(cleanJsonText);
         } else {
-            console.error('❌ AI Response Format Error:', JSON.stringify(data));
+            console.error('❌ Gemini Empty Response:', data);
             return getDefaultAnalysis(customerText);
         }
     } catch (err) {
-        console.error('❌ AI Analysis Error:', err);
+        console.error('❌ AI Analysis Exception:', err.message);
         return getDefaultAnalysis(customerText);
     }
 }
@@ -80,15 +73,15 @@ async function analyzeFeedbackWithAI(customerText) {
 // ค่าเริ่มต้นกรณีเรียก AI ไม่สำเร็จ
 function getDefaultAnalysis(text) {
     const textLower = text.toLowerCase();
-    const isCriticalIssue = ['ร้อน', 'แอร์', 'อบอ้าว', 'พัง', 'เสีย', 'เหม็น', 'ช้ามาก', 'ห่วย'].some(keyword => textLower.includes(keyword));
+    const isCritical = ['ร้อน', 'แอร์', 'อบอ้าว', 'พัง', 'เสีย', 'เหม็น', 'ช้ามาก', 'ห่วย'].some(k => textLower.includes(k));
 
-    if (isCriticalIssue) {
+    if (isCritical) {
         return {
             sentiment: 'Negative',
             urgency: 'Critical',
             category: 'สภาพแวดล้อม/สถานที่',
             summary: text,
-            action_recommendation: 'ส่งทีมช่าง/เจ้าหน้าที่เข้าตรวจสอบสภาพแวดล้อมและระบบเครื่องปรับอากาศในพื้นที่ทันที'
+            action_recommendation: 'ส่งทีมช่าง/เจ้าหน้าที่เข้าตรวจสอบสภาพแวดล้อมและระบบเครื่องปรับอากาศด่วนที่สุด'
         };
     }
 
@@ -101,8 +94,8 @@ function getDefaultAnalysis(text) {
     };
 }
 
-// ฟังก์ชันแปลงระดับความเร่งด่วนเป็น Emoji
-function getUrgencyEmoji(urgency) {
+// แปลงระดับความเร่งด่วน
+function getUrgencyText(urgency) {
     switch (urgency) {
         case 'Critical': return '🚨🚨 CRITICAL (ด่วนที่สุด)';
         case 'High': return '🔴 HIGH (ด่วนมาก)';
@@ -112,32 +105,33 @@ function getUrgencyEmoji(urgency) {
     }
 }
 
-// ฟังก์ชันส่งแจ้งเตือนเข้า Telegram (ปรับให้รองรับ Plain Text หรือ HTML ป้องกัน Syntax Error)
+// ฟังก์ชันส่งแจ้งเตือนเข้า Telegram (แบบ Plain Text 100% ป้องกัน Parse Error)
 async function sendTelegramAlert(customerText, formattedDate, analysis) {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     const chatId = process.env.TELEGRAM_CHAT_ID;
 
     if (!token || !chatId) {
-        console.warn('⚠️ ไม่พบ TELEGRAM_BOT_TOKEN หรือ TELEGRAM_CHAT_ID ในระบบ');
+        console.error('❌ [Telegram Config Error] ไม่พบ TELEGRAM_BOT_TOKEN หรือ TELEGRAM_CHAT_ID ใน process.env');
         return;
     }
 
-    const urgencyTag = getUrgencyEmoji(analysis.urgency);
+    const urgencyTag = getUrgencyText(analysis.urgency);
 
-    const message = `📥 <b>แจ้งเตือน Feedback ใหม่จากลูกค้า!</b>
+    // ใช้ Plain Text ป้องกันตัวอักษรพิเศษทำลาย Markdown/HTML syntax
+    const message = `📥 แจ้งเตือน Feedback ใหม่จากลูกค้า!
 
-📌 <b>ข้อความที่ได้รับ:</b> 
+📌 ข้อความที่ได้รับ:
 "${customerText}"
 
-🤖 <b>ผลการวิเคราะห์โดย AI:</b>
-• <b>ความรู้สึก:</b> ${analysis.sentiment}
-• <b>ระดับความเร่งด่วน:</b> ${urgencyTag}
-• <b>หมวดหมู่:</b> ${analysis.category}
-• <b>สรุปประเด็น:</b> ${analysis.summary}
-💡 <b>คำแนะนำการดำเนินการ:</b> ${analysis.action_recommendation}
+🤖 ผลการวิเคราะห์โดย AI:
+• ความรู้สึก: ${analysis.sentiment}
+• ระดับความเร่งด่วน: ${urgencyTag}
+• หมวดหมู่: ${analysis.category}
+• สรุปประเด็น: ${analysis.summary}
+💡 คำแนะนำการดำเนินการ: ${analysis.action_recommendation}
 
-📅 <b>วันที่และเวลา:</b> ${formattedDate}
-📍 <b>สถานที่:</b> สาขากาฬสินธุ์`;
+📅 วันที่และเวลา: ${formattedDate}
+📍 สถานที่: สาขากาฬสินธุ์`;
 
     try {
         const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -145,19 +139,20 @@ async function sendTelegramAlert(customerText, formattedDate, analysis) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 chat_id: chatId,
-                text: message,
-                parse_mode: 'HTML' // เปลี่ยนเป็น HTML ป้องกัน Markdown parse error
+                text: message
+                // ตัด parse_mode ออกชั่วคราวเพื่อให้มั่นใจว่าส่งผ่านแน่นอน 100%
             })
         });
 
         const data = await response.json();
+        
         if (!data.ok) {
-            console.error('❌ Telegram API Error:', data);
+            console.error('❌ [Telegram API Rejected]:', data);
         } else {
-            console.log('✅ ส่งแจ้งเตือนไปยัง Telegram เรียบร้อยแล้ว');
+            console.log('✅ [Telegram Sent Success]: ข้อความถูกส่งสำเร็จ!');
         }
     } catch (err) {
-        console.error('❌ Fetch Error Telegram:', err);
+        console.error('❌ [Telegram Fetch Network Error]:', err);
     }
 }
 
@@ -185,19 +180,17 @@ app.post('/api/feedback', async (req, res) => {
         // 1. วิเคราะห์ด้วย AI
         const analysis = await analyzeFeedbackWithAI(text);
 
-        // 2. เรียกส่ง Telegram แบบ Asynchronous (ไม่ต้อง await เพื่อไม่ให้ตัวเว็บรอนาน)
-        sendTelegramAlert(text, formattedDate, analysis).catch(err => 
-            console.error('❌ Telegram Async Error:', err)
-        );
+        // 2. ส่ง Telegram (ใช้ await เพื่อบังคับให้รอส่งจบก่อนตอบกลับ client)
+        await sendTelegramAlert(text, formattedDate, analysis);
 
-        // 3. ส่งข้อมูลตอบกลับไปยัง Frontend ทันที
+        // 3. ตอบกลับหน้าเว็บ
         return res.json({
             success: true,
             analysis: analysis
         });
 
     } catch (error) {
-        console.error('API Error Details:', error);
+        console.error('❌ Server API Error:', error);
         return res.status(500).json({ error: `เกิดข้อผิดพลาด: ${error.message}` });
     }
 });
