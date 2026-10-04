@@ -15,7 +15,7 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 async function analyzeFeedback(customerText) {
     try {
         const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: 'gemini-3.8-flash',
             contents: `วิเคราะห์ข้อความ Feedback จากลูกค้าดังต่อไปนี้: "${customerText}"`,
             config: {
                 systemInstruction: `คุณคือ AI วิเคราะห์ Feedback ลูกค้าของร้านค้า ให้ประเมินระดับ Sentiment (เชิงบวก/เชิงลบ/ปานกลาง), ความเร่งด่วน (Low/Normal/High/Urgent), หมวดหมู่เรื่องร้องเรียน/เสนอแนะ, สรุปใจความสำคัญ และคำแนะนำในการดำเนินการต่อ`,
