@@ -181,6 +181,22 @@ app.post('/api/feedback', async (req, res) => {
         console.error('❌ Server Error:', error);
         return res.status(500).json({ error: `เกิดข้อผิดพลาด: ${error.message}` });
     }
+});// ... โค้ดเดิมของคุณด้านบน ...
+
+// 📌 เพิ่มโค้ดส่วนนี้เข้าไป
+app.post('/api/webhook', (req, res) => {
+    const events = req.body.events || [];
+    events.forEach(event => {
+        if (event.source && event.source.groupId) {
+            console.log('📌 =====================================');
+            console.log('✅ ได้รับ GROUP ID แล้ว:');
+            console.log(event.source.groupId);
+            console.log('📌 =====================================');
+        }
+    });
+    return res.status(200).send('OK');
 });
+
+// ... โค้ดเดิมของคุณด้านล่าง เช่น export default app; ...
 
 export default app;
