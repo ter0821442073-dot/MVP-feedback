@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Feedback & Sentiment Alert System</title>
+    <title>AI Feedback & Sentiment System</title>
     <style>
         body { font-family: sans-serif; max-width: 650px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
         .form-group { margin-bottom: 15px; }
@@ -20,11 +20,10 @@
         .bg-Negative { background-color: #dc3545; }
         .bg-Neutral { background-color: #ffc107; color: #333; }
         .bg-Positive { background-color: #28a745; }
-        .alert-box { margin-top: 10px; padding: 10px; background-color: #f8d7da; color: #721c24; border-radius: 4px; border: 1px solid #f5c6cb; font-weight: bold; }
     </style>
 </head>
 <body>
-    <h2>ส่ง Feedback และการแจ้งเตือน</h2>
+    <h2>ส่ง Feedback</h2>
 
     <!-- เพิ่มส่วนกรอกข้อมูลผู้ส่ง -->
     <div class="form-group">
@@ -72,7 +71,7 @@
                 const response = await fetch('/api/feedback', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text, name, phone }) // ส่ง name และ phone ไปที่ Backend
+                    body: JSON.stringify({ text, name, phone })
                 });
                 
                 const data = await response.json();
@@ -83,12 +82,6 @@
                 }
 
                 const res = data.analysis;
-                let alertHtml = '';
-                
-                // แสดงแถบแจ้งเตือนเมื่อมีการส่ง Telegram
-                if (res.sentiment === 'Negative' || res.urgency === 'Critical' || res.urgency === 'High' || res.urgency === 'Medium') {
-                    alertHtml = `<div class="alert-box">🚨 ระบบส่งแจ้งเตือนเข้า Telegram เรียบร้อยแล้ว!</div>`;
-                }
 
                 resultDiv.innerHTML = `
                     <h3>ผลการวิเคราะห์</h3>
@@ -98,7 +91,6 @@
                     <p><strong>หมวดหมู่:</strong> ${res.category}</p>
                     <p><strong>สรุปปัญหา:</strong> ${res.summary}</p>
                     <p><strong>คำแนะนำทีมงาน:</strong> ${res.action_recommendation}</p>
-                    ${alertHtml}
                 `;
 
                 // ล้างช่องข้อความ Feedback ออกหลังส่งสำเร็จ
