@@ -1,59 +1,55 @@
-import express from 'express';
-import dotenv from 'dotenv';
-import fetch from 'node-fetch';
-
-dotenv.config();
-
-const app = express();
-app.use(express.json());
-
-// ค่าเริ่มต้นกรณี AI ล้มเหลว
-function getDefaultAnalysis(text) {
-    const textLower = text.toLowerCase();
-    const isCritical = ['ร้อน', 'แอร์', 'อบอ้าว', 'พัง', 'เสีย', 'เหม็น', 'ช้ามาก', 'ห่วย'].some(k => textLower.includes(k));
-
-    return {
-        sentiment: isCritical ? 'Negative' : 'Neutral',
-        urgency: isCritical ? 'Critical' : 'Medium',
-        category: isCritical ? 'สภาพแวดล้อม/สถานที่' : 'ทั่วไป',
-        summary: text,
-        action_recommendation: isCritical 
-            ? 'ส่งทีมช่าง/เจ้าหน้าที่เข้าตรวจสอบสภาพแวดล้อมและระบบเครื่องปรับอากาศด่วนที่สุด' 
-            : 'ตรวจสอบข้อความและพิจารณาดำเนินการตามความเหมาะสม'
-    };
-}
-
-// ฟังก์ชันเรียก AI วิเคราะห์
+// ฟังก์ชันเรียก AI วิเคราะห์ (เวอร์ชันปรับปรุงสำหรับโรงภาพยนตร์)
 async function analyzeFeedbackWithAI(customerText) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) return getDefaultAnalysis(customerText);
 
-    const promptText = `คุณคือ AI วิเคราะห์ความคิดเห็นลูกค้า
-กรุณาวิเคราะห์ข้อความนี้: "${customerText}"
+    const promptText = `คุณคือ AI วิเคราะห์ความคิดเห็นลูกค้าสำหรับ "ธุรกิจโรงภาพยนตร์" (Cinema) 
+หน้าที่ของคุณคืออ่านข้อความติชมจากลูกค้า และสกัดข้อมูลออกมาตามโครงสร้าง JSON ที่กำหนด
 
-เงื่อนไข:
-- บ่นเรื่อง ร้อน, แอร์ไม่เย็น, กลิ่นเหม็น, อาหารเสีย -> sentiment: "Negative", urgency: "Critical"
-- คำชม -> sentiment: "Positive", urgency: "Low"
+### หมวดหมู่ที่ใช้ตอบ (category):
+1. "ระบบฉายและเสียง" (จอภาพ, ภาพเบลอ, สีเพี้ยน, เสียงเบา/ดังไป, ซับไตเติลหาย, แอร์ไม่เย็น)
+2. "ความสะอาดและสถานที่" (เบาะสกปรก, พื้นเหนียว, กลิ่นเหม็น, ห้องน้ำ, ขยะ)
+3. "อาหารและเครื่องดื่ม" (ป๊อปคอร์นเหนียว/เค็ม/เย็น, น้ำอัดลมไม่มีงวด, รอนาน, อาหารเสีย)
+4. "พนักงานและการบริการ" (พูดจาไม่ดี, ชักสีหน้า, คิดเงินผิด, แนะนำไม่ดี, แถวยาว)
+5. "ระบบตั๋วและแอปพลิเคชัน" (จองตั๋วไม่ได้, ตู้ตั๋วเสีย, ตัดเงินแต่ไม่ได้ตั๋ว, สแกนไม่ผ่าน)
+6. "พฤติกรรมลูกค้าท่านอื่น" (คุยเสียงดัง, เล่นโทรศัพท์, เอาเท้าพาด, เด็กร้องไห้)
+7. "ทั่วไป / คำชม" (ชมเชย, เสนอแนะทั่วไป)
 
-ตอบเป็น JSON โครงสร้างนี้เท่านั้น:
+### กฎการวิเคราะห์ระดับความเร่งด่วน (urgency) และ ความรู้สึก (sentiment):
+- **Critical**: เหตุการณ์ที่กระทบต่อการรับชมทันที หรือความปลอดภัย เช่น แอร์ดับ/ร้อนมาก, หนังกระตุก/ดับกลางคราว, ภาพ/เสียงเสีย, เพลิงไหม้/อันตราย, อาหารเสียเน่าเสีย
+- **High**: เหตุการณ์ที่ทำให้ลูกค้าเสียอารมณ์อย่างมาก หรือมีปัญหาระบบเงิน เช่น คิดเงินผิด/ตัดเงินไม่ได้ตั๋ว, พนักงานแสดงกิริยาหยาบคายมาก, ห้องน้ำส่งกลิ่นเหม็นรุนแรง, ป๊อปคอร์นมีสิ่งแปลกปลอม
+- **Medium**: ข้อติชมทั่วไปเกี่ยวกับการบริการ, ความสะอาดเล็กน้อย, แถวยาว, ป๊อปคอร์นไม่อร่อย, ลูกค้าคนอื่นส่งเสียงดัง
+- **Low**: คำชมเชย, ข้อเสนอแนะทั่วไปที่ไม่กระทบการบริการปัจจุบัน
+
+### เงื่อนไขการตอบกลับ:
+- ตอบกลับเป็น JSON ภาษาไทย รูปแบบนี้เท่านั้น ห้ามใส่ข้อความอื่นนอกเหนือจาก JSON
 {
   "sentiment": "Positive" | "Neutral" | "Negative",
   "urgency": "Low" | "Medium" | "High" | "Critical",
-  "category": "หมวดหมู่",
-  "summary": "สรุป 1 ประโยค",
-  "action_recommendation": "คำแนะนำ"
-}`;
+  "category": "ระบุ 1 หมวดหมู่จากด้านบน",
+  "summary": "สรุปใจความสำคัญใน 1 ประโยคสั้นๆ",
+  "action_recommendation": "คำแนะนำสั้นๆ สำหรับผู้จัดการโรงหนังในการแก้ไขปัญหา"
+}
+
+ข้อความของลูกค้า: "${customerText}"`;
 
     try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        const timeoutId = setTimeout(() => controller.abort(), 6000); // ขยายเวลาเป็น 6 วิเพื่อความเสถียร
 
         const response = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             signal: controller.signal,
-            body: JSON.stringify({ contents: [{ parts: [{ text: promptText }] }] })
+            body: JSON.stringify({
+                contents: [{ parts: [{ text: promptText }] }],
+                // ปรับ Temperature ต่ำลงเพื่อให้ AI ตอบแม่นยำตามสั่ง ไม่มโน
+                generationConfig: {
+                    temperature: 0.1,
+                    responseMimeType: "application/json" // บังคับคืนค่าเป็น JSON
+                }
+            })
         });
 
         clearTimeout(timeoutId);
@@ -63,163 +59,10 @@ async function analyzeFeedbackWithAI(customerText) {
         const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
         if (!rawText) return getDefaultAnalysis(customerText);
 
-        const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-        return jsonMatch ? JSON.parse(jsonMatch[0]) : getDefaultAnalysis(customerText);
+        return JSON.parse(rawText);
 
     } catch (err) {
+        console.error('AI Analysis Error:', err);
         return getDefaultAnalysis(customerText);
     }
 }
-
-function getUrgencyText(urgency) {
-    switch (urgency) {
-        case 'Critical': return '🚨🚨 CRITICAL (ด่วนที่สุด)';
-        case 'High': return '🔴 HIGH (ด่วนมาก)';
-        case 'Medium': return '🟠 MEDIUM (ปานกลาง)';
-        case 'Low': return '🟢 LOW (ทั่วไป)';
-        default: return '⚪ NORMAL';
-    }
-}
-
-/**
- * ฟังก์ชันส่งแจ้งเตือนผ่าน LINE Messaging API (Push Message)
- */
-async function sendLinePushAlert(customerText, name, phone, formattedDate, analysis) {
-    const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-    const targetId = process.env.LINE_TARGET_ID; // สามารถเป็น User ID หรือ Group ID ได้
-
-    if (!channelToken || !targetId) {
-        console.warn('⚠️ ไม่พบ LINE_CHANNEL_ACCESS_TOKEN หรือ LINE_TARGET_ID ในระบบ');
-        return;
-    }
-
-    const urgencyTag = getUrgencyText(analysis.urgency);
-    const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
-
-    const messageText = `📥 แจ้งเตือน Feedback ใหม่!
-
-👤 ผู้ส่งข้อมูล: ${customerInfo}
-
-📌 ข้อความที่ได้รับ:
-"${customerText}"
-
-🤖 ผลการวิเคราะห์โดย AI:
-• ความรู้สึก: ${analysis.sentiment}
-• ระดับความเร่งด่วน: ${urgencyTag}
-• หมวดหมู่: ${analysis.category}
-• สรุปประเด็น: ${analysis.summary}
-💡 คำแนะนำ: ${analysis.action_recommendation}
-
-📅 วันที่และเวลา: ${formattedDate}
-📍 สถานที่: สาขากาฬสินธุ์`;
-
-    try {
-        const response = await fetch('https://api.line.me/v2/bot/message/push', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${channelToken}`
-            },
-            body: JSON.stringify({
-                to: targetId,
-                messages: [
-                    {
-                        type: 'text',
-                        text: messageText
-                    }
-                ]
-            })
-        });
-
-        const data = await response.json();
-        if (response.ok) {
-            console.log('✅ ส่งแจ้งเตือนผ่าน LINE Messaging API สำเร็จ!');
-        } else {
-            console.error('❌ LINE API Error:', data);
-        }
-    } catch (err) {
-        console.error('❌ LINE Network Error:', err);
-    }
-}
-
-// Endpoint รับข้อมูล Feedback
-app.post('/api/feedback', async (req, res) => {
-    try {
-        const { text, name, phone } = req.body;
-
-        if (!text) {
-            return res.status(400).json({ error: 'กรุณากรอกข้อความ Feedback' });
-        }
-
-        const now = new Date();
-        const formattedDate = now.toLocaleString('th-TH', {
-            timeZone: 'Asia/Bangkok',
-            year: 'numeric',
-            month: 'short',
-            day: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: false
-        }) + ' น.';
-
-        // 1. วิเคราะห์ด้วย AI
-        const analysis = await analyzeFeedbackWithAI(text);
-
-        // 2. ส่งแจ้งเตือนผ่าน LINE Messaging API
-        sendLinePushAlert(text, name, phone, formattedDate, analysis).catch(err => 
-            console.error('❌ LINE Async Error:', err)
-        );
-
-        // 3. ตอบกลับหน้าเว็บทันที
-        return res.json({
-            success: true,
-            analysis: analysis
-        });
-
-    } catch (error) {
-        console.error('❌ Server Error:', error);
-        return res.status(500).json({ error: `เกิดข้อผิดพลาด: ${error.message}` });
-    }
-});// ... โค้ดเดิมของคุณด้านบน ...
-
-/// Endpoint สำหรับดึง Group ID โดยตอบกลับในแชทกลุ่มทันที
-app.post('/api/webhook', async (req, res) => {
-    try {
-        const events = req.body.events || [];
-        
-        for (const event of events) {
-            // ตรวจจับเมื่อมีคนพิมพ์ข้อความในกลุ่ม
-            if (event.type === 'message' && event.message.type === 'text') {
-                const groupId = event.source.groupId;
-                const replyToken = event.replyToken;
-
-                // ถ้ามี groupId (ส่งมาจากในกลุ่ม) ให้บอทตอบกลับทันที
-                if (groupId && replyToken) {
-                    await fetch('https://api.line.me/v2/bot/message/reply', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`
-                        },
-                        body: JSON.stringify({
-                            replyToken: replyToken,
-                            messages: [{
-                                type: 'text',
-                                text: `📌 Group ID ของกลุ่มนี้คือ:\n${groupId}`
-                            }]
-                        })
-                    });
-                }
-            }
-        }
-        return res.status(200).send('OK');
-    } catch (err) {
-        console.error(err);
-        return res.status(200).send('OK');
-            }
-});
-
-// ... โค้ดเดิมของคุณด้านล่าง เช่น export default app; ...
-
-export default app;
