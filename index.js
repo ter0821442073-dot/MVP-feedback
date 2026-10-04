@@ -7,131 +7,136 @@ const app = express();
 app.use(express.json());
 
 /**
- * ฟังก์ชันจำแนกหมวดหมู่และวิเคราะห์สำรอง (Version 4.3 - Fixed Category Hierarchy)
- * แก้ปัญหาพนักงานบริการไม่ดี แต่หลุดไปหมวดระบบฉายและเสียง
+ * 1. ฟังก์ชันกรองและปรับปรุงผลลัพธ์ขั้นสุดท้าย (Post-Processing Guardrail)
+ * ป้องกัน AI / Keyword ประมวลผลพลาด 100%
+ */
+function applyGuardrail(analysis, text) {
+    const textLower = text.toLowerCase();
+
+    // รายการคำชมเชยชัดเจน
+    const positiveKeywords = ['ดีมาก', 'ดีเยี่ยม', 'ประทับใจ', 'ชมเชย', 'สุดยอด', 'น่ารัก', 'ยิ้มแย้ม', 'พูดจาดี', 'สะอาดมาก', 'หอม', 'อร่อย', 'บริการดี'];
+    // รายการคำร้องเรียน/ปัญหาชัดเจน
+    const negativeKeywords = ['ไม่ดี', 'แย่', 'ห่วย', 'ช้า', 'พัง', 'เสีย', 'เหม็น', 'สกปรก', 'หนาว', 'ร้อน', 'อบอ้าว', 'ไม่กรอบ', 'เหนียว', 'เค็ม', 'ด่า', 'กระตุก', 'ดับ', 'ขึ้นเสียง', 'หน้าบึ้ง', 'ไม่ยิ้ม', 'ไม่ฉาย'];
+
+    const hasPositive = positiveKeywords.some(k => textLower.includes(k));
+    const hasNegative = negativeKeywords.some(k => textLower.includes(k));
+
+    // กฎเหล็กที่ 1: ถ้ามีคำชมและไม่มีคำติ -> บังคับ Positive + Urgency Low + คำแนะนำเชิงบวก
+    if (hasPositive && !hasNegative) {
+        analysis.sentiment = 'Positive';
+        analysis.urgency = 'Low';
+
+        if (analysis.category === 'พนักงานและการบริการ' || textLower.includes('พนักงาน') || textLower.includes('บริการ')) {
+            analysis.category = 'พนักงานและการบริการ';
+            analysis.action_recommendation = 'ส่งคำชมเชยไปยังพนักงานและผู้จัดการสาขาเพื่อเป็นกำลังใจในการทำงาน';
+        } else if (textLower.includes('ป๊อปคอร์น') || textLower.includes('อาหาร') || textLower.includes('อร่อย')) {
+            analysis.category = 'อาหารและเครื่องดื่ม';
+            analysis.action_recommendation = 'ชื่นชมทีมเคาน์เตอร์อาหารและรักษาคุณภาพสินค้าต่อไป';
+        } else {
+            analysis.action_recommendation = 'ขอบคุณสำหรับคำชมเชย และจะรักษามาตรฐานการบริการที่ดีต่อไป';
+        }
+    }
+
+    // กฎเหล็กที่ 2: เรื่องหนังไม่ฉาย / จอดำ / ไฟดับ -> บังคับ Critical + Negative
+    if (['หนังไม่ฉาย', 'ไม่ฉาย', 'จอดำ', 'ไม่มีเสียง', 'ไฟดับ'].some(k => textLower.includes(k))) {
+        analysis.sentiment = 'Negative';
+        analysis.urgency = 'Critical';
+        analysis.category = 'ระบบฉายและเสียง';
+        analysis.action_recommendation = '🚨 แจ้งช่างเทคนิคและผู้จัดการโรงภาพยนตร์เข้าตรวจสอบห้องควบคุมการฉาย (Projection Room) ทันที!';
+    }
+
+    // กฎเหล็กที่ 3: แอร์หนาว / ร้อน -> บังคับ ระบบปรับอากาศ
+    if (['แอร์', 'หนาว', 'ร้อน', 'อบอ้าว'].some(k => textLower.includes(k)) && !textLower.includes('เสียง')) {
+        analysis.category = 'ระบบปรับอากาศ (แอร์)';
+        if (hasNegative || textLower.includes('หนาว') || textLower.includes('ร้อน')) {
+            analysis.sentiment = 'Negative';
+            analysis.urgency = 'Critical';
+            analysis.action_recommendation = 'ประสานงานช่างอาคารเข้าตรวจสอบและปรับอุณหภูมิเครื่องปรับอากาศด่วน';
+        }
+    }
+
+    // กฎเหล็กที่ 4: ห้องน้ำ / ความสะอาด -> บังคับ ความสะอาดและสถานที่
+    if (['ห้องน้ำ', 'เหม็น', 'สกปรก', 'ขยะ'].some(k => textLower.includes(k))) {
+        analysis.category = 'ความสะอาดและสถานที่';
+        if (hasNegative || textLower.includes('เหม็น') || textLower.includes('สกปรก')) {
+            analysis.sentiment = 'Negative';
+            analysis.urgency = 'High';
+            analysis.action_recommendation = 'แจ้งแม่บ้าน/ทีมทำความสะอาดเข้าตรวจสอบและจัดการความสะอาดทันที';
+        }
+    }
+
+    return analysis;
+}
+
+/**
+ * 2. ระบบจำแนกสำรอง (Fallback Algorithm)
  */
 function getDefaultAnalysis(text) {
     const textLower = text.toLowerCase();
 
-    // 1. ตรวจจับหมวดพนักงานและการบริการ (ขึ้นก่อนเพื่อป้องกันคีย์เวิร์ดกว้างๆ หลุดไปหมวดอื่น)
-    const isStaff = ['พนักงาน', 'บริการ', 'ชักสีหน้า', 'พูดจา', 'แถวยาว', 'คิดเงินผิด', 'ไม่ยิ้ม', 'ขึ้นเสียง', 'หน้าบึ้ง', 'มารยาท', 'พนักงานไม่ดี'].some(k => textLower.includes(k));
-
-    // 2. ตรวจจับหมวดความสะอาดและสถานที่
-    const isSanitation = ['ห้องน้ำ', 'เหม็น', 'สกปรก', 'ขยะ', 'พื้นเหนียว', 'เบาะเปรอะ', 'กลิ่น', 'ชักโครก'].some(k => textLower.includes(k));
-
-    // 3. ตรวจจับหมวดระบบปรับอากาศ (แอร์)
-    const isHVAC = ['แอร์', 'หนาว', 'ร้อน', 'อบอ้าว', 'อุณหภูมิ', 'เย็นเกิน', 'ร้อนมาก'].some(k => textLower.includes(k));
-
-    // 4. ตรวจจับหมวดอาหารและเครื่องดื่ม
-    const isFood = ['ป๊อปคอร์น', 'ป็อบคอร์น', 'น้ำอัดลม', 'ขนม', 'ไม่กรอบ', 'เหนียว', 'เค็ม', 'อาหาร', 'รสชาติ'].some(k => textLower.includes(k));
-
-    // 5. ตรวจจับหมวดระบบฉายและเสียง
-    const isAV = ['หนังไม่ฉาย', 'ไม่ฉาย', 'จอดำ', 'ไม่มีเสียง', 'เสียงหาย', 'ภาพหาย', 'ไฟดับ', 'หนังกระตุก', 'ภาพเบลอ', 'เสียงเบา', 'เสียงดัง', 'ซับ', 'ลำโพง', 'ฉาย'].some(k => textLower.includes(k));
-
-    // 6. ตรวจจับหมวดระบบตั๋วและแอป
-    const isTicket = ['ตั๋ว', 'แอป', 'ตู้', 'จอง', 'ตัดเงิน'].some(k => textLower.includes(k));
-
-    // ตรวจจับ Sentiment
     const isPositive = ['ดีมาก', 'ดีเยี่ยม', 'ประทับใจ', 'ชมเชย', 'สุดยอด', 'สะอาด', 'หอม', 'กรอบ', 'พูดจาดี', 'ยิ้มแย้ม', 'น่ารัก'].some(k => textLower.includes(k));
-    const isNegative = isStaff || isSanitation || isHVAC || isFood || isAV || isTicket || ['ไม่ดี', 'แย่', 'ห่วย', 'ช้า', 'พัง', 'เสีย', 'ด่า', 'กระตุก', 'ดับ'].some(k => textLower.includes(k));
-
-    let sentiment = 'Neutral';
-    if (isPositive && !isNegative) {
-        sentiment = 'Positive';
-    } else if (isNegative) {
-        sentiment = 'Negative';
-    }
+    const isNegative = ['ไม่ดี', 'แย่', 'ห่วย', 'ช้า', 'พัง', 'เสีย', 'เหม็น', 'สกปรก', 'หนาว', 'ร้อน', 'อบอ้าว', 'ไม่กรอบ', 'เหนียว', 'เค็ม', 'ด่า', 'กระตุก', 'ดับ', 'ขึ้นเสียง', 'หน้าบึ้ง', 'ไม่ยิ้ม', 'ไม่ฉาย'].some(k => textLower.includes(k));
 
     let category = 'ทั่วไป / คำชม';
     let action = 'ขอบคุณสำหรับข้อเสนอแนะ และจะนำไปพัฒนาปรับปรุงการให้บริการต่อไป';
     let urgency = 'Low';
 
-    // เรียงลำดับ Check หมวดหมู่ตามความถูกต้อง
-    if (isStaff) {
+    if (textLower.includes('พนักงาน') || textLower.includes('บริการ')) {
         category = 'พนักงานและการบริการ';
-        action = sentiment === 'Negative' 
-            ? 'ประสานงานผู้จัดการสาขาตักเตือนและปรับปรุงพฤติกรรม/การให้บริการของพนักงานด่วน' 
-            : 'ส่งคำชมเชยไปยังพนักงานและผู้จัดการสาขาเพื่อเป็นกำลังใจในการทำงาน';
-        urgency = sentiment === 'Negative' ? 'High' : 'Low';
-    } else if (isSanitation) {
+    } else if (['ห้องน้ำ', 'เหม็น', 'สกปรก', 'ขยะ'].some(k => textLower.includes(k))) {
         category = 'ความสะอาดและสถานที่';
-        action = sentiment === 'Negative' 
-            ? 'แจ้งแม่บ้าน/ทีมทำความสะอาดเข้าตรวจสอบและจัดการความสะอาดทันที' 
-            : 'ชื่นชมทีมงานแม่บ้านและรักษามาตรฐานความสะอาดต่อไป';
-        urgency = sentiment === 'Negative' ? 'High' : 'Low';
-    } else if (isHVAC) {
+    } else if (['แอร์', 'หนาว', 'ร้อน', 'อบอ้าว'].some(k => textLower.includes(k))) {
         category = 'ระบบปรับอากาศ (แอร์)';
-        action = sentiment === 'Negative' 
-            ? 'ประสานงานช่างอาคารเข้าตรวจสอบและปรับอุณหภูมิเครื่องปรับอากาศด่วน' 
-            : 'รักษามาตรฐานอุณหภูมิที่เหมาะสมภายในโรงภาพยนตร์';
-        urgency = sentiment === 'Negative' ? 'Critical' : 'Low';
-    } else if (isFood) {
+    } else if (['ป๊อปคอร์น', 'ป็อบคอร์น', 'น้ำอัดลม', 'ขนม', 'อาหาร'].some(k => textLower.includes(k))) {
         category = 'อาหารและเครื่องดื่ม';
-        action = sentiment === 'Negative' 
-            ? 'ตรวจสอบคุณภาพอาหาร/เครื่องดื่มในเคาน์เตอร์ และเปลี่ยนสินค้าใหม่ให้ลูกค้า' 
-            : 'ชื่นชมทีมเคาน์เตอร์อาหารและรักษาคุณภาพสินค้าต่อไป';
-        urgency = sentiment === 'Negative' ? 'Medium' : 'Low';
-    } else if (isAV) {
+    } else if (['หนัง', 'เสียง', 'ภาพ', 'จอ', 'ซับ', 'ลำโพง', 'ฉาย'].some(k => textLower.includes(k))) {
         category = 'ระบบฉายและเสียง';
-        if (sentiment === 'Negative' || textLower.includes('ไม่ฉาย') || textLower.includes('จอดำ') || textLower.includes('ดับ')) {
-            action = '🚨 แจ้งช่างเทคนิคและผู้จัดการโรงภาพยนตร์เข้าตรวจสอบห้องควบคุมการฉาย (Projection Room) ทันที!';
-            urgency = 'Critical';
-            sentiment = 'Negative';
-        } else {
-            action = 'รักษามาตรฐานการฉายภาพและระบบเสียงต่อไป';
-            urgency = 'Low';
-        }
-    } else if (isTicket) {
-        category = 'ระบบตั๋วและแอปพลิเคชัน';
-        action = sentiment === 'Negative' 
-            ? 'ตรวจสอบระบบการชำระเงิน/ตู้จำหน่ายตั๋วเพื่อแก้ไขปัญหาให้ลูกค้า' 
-            : 'รักษามาตรฐานระบบตั๋วและแอปพลิเคชัน';
-        urgency = sentiment === 'Negative' ? 'High' : 'Low';
     }
 
-    return {
-        sentiment: sentiment,
-        urgency: urgency,
+    let result = {
+        sentiment: isPositive && !isNegative ? 'Positive' : isNegative ? 'Negative' : 'Neutral',
+        urgency: isNegative ? 'Medium' : 'Low',
         category: category,
         summary: text,
         action_recommendation: action
     };
+
+    return applyGuardrail(result, text);
 }
 
 /**
- * ฟังก์ชันเรียก AI วิเคราะห์ความคิดเห็น (Cinema Version 4.3)
+ * 3. ฟังก์ชันเรียก AI วิเคราะห์ความคิดเห็น
  */
 async function analyzeFeedbackWithAI(customerText) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-        console.warn('⚠️ ไม่พบ GEMINI_API_KEY ใช้ค่า Default Analysis');
         return getDefaultAnalysis(customerText);
     }
 
-    const promptText = `คุณคือ AI วิเคราะห์ความคิดเห็นลูกค้าสำหรับธุรกิจโรงภาพยนตร์ (Cinema Version 4.3)
-วิเคราะห์ข้อความลูกค้า: "${customerText}"
+    const promptText = `คุณคือ AI วิเคราะห์ความคิดเห็นลูกค้าสำหรับโรงภาพยนตร์
+วิเคราะห์ข้อความนี้: "${customerText}"
 
-[กฎเหล็กการจำแนกหมวดหมู่ (category) - ห้ามจัดหมวดผิดเด็ดขาด]:
-1. "พนักงานและการบริการ" -> เรื่อง พนักงาน, การบริการ, ไม่ดี, ไม่ยิ้ม, ขึ้นเสียงใส่, หน้าบึ้ง, พูดจาหยาบคาย, ชักสีหน้า, คิดเงินผิด (***หากมีเรื่องพนักงาน ให้เลือกหมวดนี้ทันที ห้ามใส่หมวดระบบฉาย/ช่างเทคนิคเด็ดขาด!***)
-2. "ระบบฉายและเสียง" -> เฉพาะเรื่อง หนังไม่ฉาย, จอดำ, ไม่มีเสียง, เสียงเบา/ดัง, ภาพเบลอ, ลำโพงแตก, ไฟดับในโรง
-3. "ความสะอาดและสถานที่" -> เรื่อง ห้องน้ำเหม็น, สกปรก, ขยะ, พื้นเหนียว, เบาะเปรอะ
-4. "ระบบปรับอากาศ (แอร์)" -> เรื่อง แอร์หนาว, แอร์ร้อน, หนาวมาก, อบอ้าว
-5. "อาหารและเครื่องดื่ม" -> เรื่อง ป๊อปคอร์นไม่กรอบ, เหนียว, เค็ม, น้ำอัดลมไม่มีงวด
-6. "ระบบตั๋วและแอปพลิเคชัน" -> เรื่อง จองตั๋วไม่ได้, ตัดเงินไม่ได้ตั๋ว, ตู้สแกนเสีย
-7. "พฤติกรรมลูกค้าท่านอื่น" -> เรื่อง คุยเสียงดัง, เล่นโทรศัพท์, เอาเท้าพาด
-8. "ทั่วไป / คำชม" -> คำชมเชยทั่วไป หรือ ข้อเสนอแนะอื่นๆ
+[หมวดหมู่ (category)]:
+- "พนักงานและการบริการ": เรื่องพนักงาน, การบริการ, คำชมพนักงาน, พนักงานพูดจาไม่ดี, ขึ้นเสียง
+- "ระบบปรับอากาศ (แอร์)": เรื่องแอร์, หนาว, ร้อน, อบอ้าว
+- "ความสะอาดและสถานที่": เรื่องห้องน้ำ, กลิ่นเหม็น, สกปรก, ขยะ
+- "อาหารและเครื่องดื่ม": เรื่องป๊อปคอร์น, น้ำ, ขนม, ไม่กรอบ, อร่อย
+- "ระบบฉายและเสียง": เรื่องหนังไม่ฉาย, จอดำ, ภาพเบลอ, เสียงเบา/ดัง, ลำโพง
+- "ระบบตั๋วและแอปพลิเคชัน": เรื่องจองตั๋ว, แอป, ตู้สแกน
+- "ทั่วไป / คำชม": ข้อเสนอแนะทั่วไป
 
-[กฎเรื่อง Sentiment & Action]:
-- หากเป็นข้อความติพนักงาน เช่น "พนักงานบริการไม่ดี ไม่ยิ้ม ขึ้นเสียงใส่" -> sentiment: "Negative", urgency: "High", category: "พนักงานและการบริการ"
-- คำแนะนำ (action_recommendation) ต้องสอดคล้องกับเรื่องพนักงาน เช่น "ประสานงานผู้จัดการตักเตือนและปรับปรุงพฤติกรรมการบริการของพนักงาน"
+[Sentiment]:
+- คำชม (เช่น "บริการดีมาก", "ป๊อปคอร์นอร่อย") -> Positive
+- คำติ/ปัญหา (เช่น "ห้องน้ำเหม็น", "หนาวมาก", "พนักงานไม่ยิ้ม") -> Negative
+- ทั่วไป -> Neutral
 
 ตอบเป็น JSON ภาษาไทย รูปแบบนี้เท่านั้น:
 {
   "sentiment": "Positive" | "Neutral" | "Negative",
   "urgency": "Low" | "Medium" | "High" | "Critical",
-  "category": "ระบุชื่อหมวดหมู่ที่ตรงที่สุด",
-  "summary": "สรุปใจความปัญหา/คำชมใน 1 ประโยค",
-  "action_recommendation": "คำแนะนำสั้นๆ สำหรับทีมงานในการรับมือ"
+  "category": "ระบุหมวดหมู่",
+  "summary": "สรุปสั้นๆ",
+  "action_recommendation": "คำแนะนำทีมงาน"
 }`;
 
     try {
@@ -140,25 +145,24 @@ async function analyzeFeedbackWithAI(customerText) {
         const response = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                contents: [{ parts: [{ text: promptText }] }]
-            })
+            body: JSON.stringify({ contents: [{ parts: [{ text: promptText }] }] })
         });
 
-        if (!response.ok) {
-            console.error('❌ Gemini API Error Status:', response.status);
-            return getDefaultAnalysis(customerText);
-        }
+        if (!response.ok) return getDefaultAnalysis(customerText);
 
         const data = await response.json();
         const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
         if (!rawText) return getDefaultAnalysis(customerText);
 
         const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-        return jsonMatch ? JSON.parse(jsonMatch[0]) : getDefaultAnalysis(customerText);
+        if (!jsonMatch) return getDefaultAnalysis(customerText);
+
+        let parsed = JSON.parse(jsonMatch[0]);
+        
+        // ส่งผลลัพธ์ผ่าน Guardrail เพื่อสกรีนความถูกต้อง 100%
+        return applyGuardrail(parsed, customerText);
 
     } catch (err) {
-        console.error('❌ AI Exception Error:', err.message);
         return getDefaultAnalysis(customerText);
     }
 }
@@ -174,21 +178,18 @@ function getUrgencyText(urgency) {
 }
 
 /**
- * ฟังก์ชันส่งแจ้งเตือนผ่าน LINE Messaging API
+ * 4. ฟังก์ชันส่ง LINE Alert
  */
 async function sendLinePushAlert(customerText, name, phone, formattedDate, analysis) {
     const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
     const targetId = process.env.LINE_TARGET_ID;
 
-    if (!channelToken || !targetId) {
-        console.error('❌ LINE Alert Error: ไม่พบ LINE_CHANNEL_ACCESS_TOKEN หรือ LINE_TARGET_ID');
-        return;
-    }
+    if (!channelToken || !targetId) return;
 
     const urgencyTag = getUrgencyText(analysis.urgency);
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
 
-    const messageText = `📥 แจ้งเตือน Feedback ใหม่! (Cinema v4.3)
+    const messageText = `📥 แจ้งเตือน Feedback ใหม่! (Cinema v5.0)
 
 👤 ผู้ส่งข้อมูล: ${customerInfo}
 
@@ -206,7 +207,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
 📍 สถานที่: สาขากาฬสินธุ์`;
 
     try {
-        const response = await fetch('https://api.line.me/v2/bot/message/push', {
+        await fetch('https://api.line.me/v2/bot/message/push', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -214,23 +215,11 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
             },
             body: JSON.stringify({
                 to: targetId.trim(),
-                messages: [
-                    {
-                        type: 'text',
-                        text: messageText
-                    }
-                ]
+                messages: [{ type: 'text', text: messageText }]
             })
         });
-
-        const data = await response.json();
-        if (response.ok) {
-            console.log('✅ ส่งแจ้งเตือนผ่าน LINE สำเร็จ:', data);
-        } else {
-            console.error('❌ LINE API ตอบกลับข้อผิดพลาด:', response.status, data);
-        }
     } catch (err) {
-        console.error('❌ LINE Network Error:', err.message);
+        console.error('❌ LINE Alert Error:', err.message);
     }
 }
 
@@ -238,51 +227,32 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
 app.post('/api/feedback', async (req, res) => {
     try {
         const { text, name, phone } = req.body;
-
-        if (!text) {
-            return res.status(400).json({ error: 'กรุณากรอกข้อความ Feedback' });
-        }
+        if (!text) return res.status(400).json({ error: 'กรุณากรอกข้อความ Feedback' });
 
         const now = new Date();
         const formattedDate = now.toLocaleString('th-TH', {
             timeZone: 'Asia/Bangkok',
-            year: 'numeric',
-            month: 'short',
-            day: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: false
+            year: 'numeric', month: 'short', day: 'numeric',
+            hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
         }) + ' น.';
 
-        // 1. วิเคราะห์ด้วย AI
         const analysis = await analyzeFeedbackWithAI(text);
-
-        // 2. ส่ง LINE Push Alert
         await sendLinePushAlert(text, name, phone, formattedDate, analysis);
 
-        // 3. ตอบกลับหน้าเว็บ
-        return res.json({
-            success: true,
-            analysis: analysis
-        });
-
+        return res.json({ success: true, analysis: analysis });
     } catch (error) {
-        console.error('❌ Server Error:', error);
         return res.status(500).json({ error: `เกิดข้อผิดพลาด: ${error.message}` });
     }
 });
 
-// Endpoint สำหรับ Webhook LINE Group ID
+// Endpoint สำหรับ Webhook LINE
 app.post('/api/webhook', async (req, res) => {
     try {
         const events = req.body.events || [];
-        
         for (const event of events) {
             if (event.type === 'message' && event.message.type === 'text') {
                 const groupId = event.source.groupId;
                 const replyToken = event.replyToken;
-
                 if (groupId && replyToken) {
                     await fetch('https://api.line.me/v2/bot/message/reply', {
                         method: 'POST',
@@ -292,10 +262,7 @@ app.post('/api/webhook', async (req, res) => {
                         },
                         body: JSON.stringify({
                             replyToken: replyToken,
-                            messages: [{
-                                type: 'text',
-                                text: `📌 Group ID ของกลุ่มนี้คือ:\n${groupId}`
-                            }]
+                            messages: [{ type: 'text', text: `📌 Group ID ของกลุ่มนี้คือ:\n${groupId}` }]
                         })
                     });
                 }
@@ -303,7 +270,6 @@ app.post('/api/webhook', async (req, res) => {
         }
         return res.status(200).send('OK');
     } catch (err) {
-        console.error(err);
         return res.status(200).send('OK');
     }
 });
