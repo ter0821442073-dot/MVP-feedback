@@ -1,39 +1,113 @@
-<!-- ช่องกรอกข้อมูลผู้ใช้งาน -->
-<input type="text" id="userName" placeholder="ชื่อของคุณ (เช่น คุณสมชาย)" />
-<input type="tel" id="userPhone" placeholder="เบอร์โทรศัพท์ (เผื่อให้เจ้าหน้าที่ติดต่อกลับ)" />
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Feedback & Sentiment Alert System</title>
+    <style>
+        body { font-family: sans-serif; max-width: 650px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
+        .form-group { margin-bottom: 15px; }
+        label { font-weight: bold; display: block; margin-bottom: 5px; }
+        input[type="text"], input[type="tel"], textarea { 
+            width: 100%; padding: 10px; box-sizing: border-box; font-size: 14px; 
+            border: 1px solid #ccc; border-radius: 4px; 
+        }
+        textarea { height: 120px; resize: vertical; }
+        button { padding: 10px 20px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; width: 100%; }
+        button:hover { background-color: #0056b3; }
+        #result { margin-top: 20px; padding: 15px; border-radius: 6px; background-color: #f8f9fa; border: 1px solid #ddd; display: none; }
+        .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-weight: bold; color: white; }
+        .bg-Negative { background-color: #dc3545; }
+        .bg-Neutral { background-color: #ffc107; color: #333; }
+        .bg-Positive { background-color: #28a745; }
+        .alert-box { margin-top: 10px; padding: 10px; background-color: #f8d7da; color: #721c24; border-radius: 4px; border: 1px solid #f5c6cb; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h2>ส่ง Feedback และการแจ้งเตือน</h2>
 
-<!-- ช่องกรอก Feedback -->
-<textarea id="feedbackText" placeholder="พิมพ์ข้อความ Feedback ที่นี่..."></textarea>
-<button onclick="submitFeedback()">ส่งข้อความ</button>
+    <!-- เพิ่มส่วนกรอกข้อมูลผู้ส่ง -->
+    <div class="form-group">
+        <label for="userName">ชื่อของคุณ (ไม่บังคับ):</label>
+        <input type="text" id="userName" placeholder="เช่น คุณสมชาย">
+    </div>
 
-<script>
-  // โหลดข้อมูลเดิมที่เคยกรอกไว้ให้อัตโนมัติ (ถ้ามี)
-  document.getElementById('userName').value = localStorage.getItem('user_name') || '';
-  document.getElementById('userPhone').value = localStorage.getItem('user_phone') || '';
+    <div class="form-group">
+        <label for="userPhone">เบอร์โทรศัพท์ (ไม่บังคับ):</label>
+        <input type="tel" id="userPhone" placeholder="เช่น 0812345678">
+    </div>
 
-  async function submitFeedback() {
-    const text = document.getElementById('feedbackText').value;
-    const name = document.getElementById('userName').value;
-    const phone = document.getElementById('userPhone').value;
+    <div class="form-group">
+        <label for="inputText">ข้อความ Feedback:</label>
+        <textarea id="inputText" placeholder="พิมพ์ข้อความจากลูกค้า เช่น 'ปัญหาที่พบเจอ การบริการ สิ่งที่อยากแนะนำ อื่นๆ'..."></textarea>
+    </div>
 
-    if (!text) {
-      alert('กรุณากรอกข้อความก่อนส่งครับ');
-      return;
-    }
+    <button onclick="sendFeedback()">ส่งข้อความ</button>
 
-    // บันทึกชื่อและเบอร์ไว้ในเครื่อง เพื่อใช้ครั้งต่อไปโดยไม่ต้องพิมพ์ซ้ำ
-    localStorage.setItem('user_name', name);
-    localStorage.setItem('user_phone', phone);
+    <div id="result"></div>
 
-    const response = await fetch('/api/feedback', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, name, phone })
-    });
+    <script>
+        // เมื่อเปิดหน้าเว็บ ดึงข้อมูลชื่อและเบอร์เดิมที่เคยกรอกไว้ให้อัตโนมัติ (ถ้ามี)
+        window.onload = function() {
+            document.getElementById('userName').value = localStorage.getItem('feedback_user_name') || '';
+            document.getElementById('userPhone').value = localStorage.getItem('feedback_user_phone') || '';
+        };
 
-    const result = await response.json();
-    if (result.success) {
-      alert('ส่งข้อมูลเรียบร้อยแล้ว ขอบคุณสำหรับ Feedback ครับ!');
-    }
-  }
-</script>
+        async function sendFeedback() {
+            const name = document.getElementById('userName').value.trim();
+            const phone = document.getElementById('userPhone').value.trim();
+            const text = document.getElementById('inputText').value.trim();
+            const resultDiv = document.getElementById('result');
+            
+            if (!text) return alert('กรุณากรอกข้อความก่อนครับ');
+            
+            // บันทึกชื่อและเบอร์ลง LocalStorage เพื่อให้สแกนครั้งต่อไปไม่ต้องกรอกซ้ำ
+            if (name) localStorage.setItem('feedback_user_name', name);
+            if (phone) localStorage.setItem('feedback_user_phone', phone);
+
+            resultDiv.style.display = 'block';
+            resultDiv.innerHTML = 'กำลังวิเคราะห์ข้อความจาก AI...';
+
+            try {
+                const response = await fetch('/api/feedback', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text, name, phone }) // ส่ง name และ phone ไปที่ Backend
+                });
+                
+                const data = await response.json();
+                
+                if (data.error) {
+                    resultDiv.innerHTML = `<span style="color:red">${data.error}</span>`;
+                    return;
+                }
+
+                const res = data.analysis;
+                let alertHtml = '';
+                
+                // แสดงแถบแจ้งเตือนเมื่อมีการส่ง Telegram
+                if (res.sentiment === 'Negative' || res.urgency === 'Critical' || res.urgency === 'High' || res.urgency === 'Medium') {
+                    alertHtml = `<div class="alert-box">🚨 ระบบส่งแจ้งเตือนเข้า Telegram เรียบร้อยแล้ว!</div>`;
+                }
+
+                resultDiv.innerHTML = `
+                    <h3>ผลการวิเคราะห์</h3>
+                    <p><strong>ผู้ส่งข้อมูล:</strong> ${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})</p>
+                    <p><strong>Sentiment:</strong> <span class="badge bg-${res.sentiment}">${res.sentiment}</span></p>
+                    <p><strong>ระดับความด่วน:</strong> ${res.urgency}</p>
+                    <p><strong>หมวดหมู่:</strong> ${res.category}</p>
+                    <p><strong>สรุปปัญหา:</strong> ${res.summary}</p>
+                    <p><strong>คำแนะนำทีมงาน:</strong> ${res.action_recommendation}</p>
+                    ${alertHtml}
+                `;
+
+                // ล้างช่องข้อความ Feedback ออกหลังส่งสำเร็จ
+                document.getElementById('inputText').value = '';
+
+            } catch (err) {
+                resultDiv.innerHTML = '<span style="color:red">เกิดข้อผิดพลาดในการเชื่อมต่อ</span>';
+            }
+        }
+    </script>
+</body>
+</html>
