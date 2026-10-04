@@ -17,7 +17,6 @@ async function analyzeFeedbackWithAI(customerText) {
         return getDefaultAnalysis(customerText);
     }
 
-    // กำหนด System Instruction และ Prompt สำหรับวิเคราะห์
     const systemInstruction = `คุณคือระบบ AI ประเมินวิเคราะห์ Feedback ของลูกค้าสำหรับโรงภาพยนตร์/สถานที่บริการ 
 กฎเหล็กในการวิเคราะห์:
 1. หากลูกค้าบ่นเรื่อง "ความร้อน", "แอร์ไม่เย็น", "กลิ่นเหม็น", "สิ่งสกปรก", "อาหารเสีย", "อุปกรณ์พัง/เสีย" ต้องประเมินเป็น:
@@ -40,8 +39,7 @@ async function analyzeFeedbackWithAI(customerText) {
 }`;
 
     try {
-        // ใช้ gemini-2.0-flash เพื่อความรวดเร็วและแม่นยำสูง
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
         const response = await fetch(url, {
             method: 'POST',
@@ -79,10 +77,9 @@ async function analyzeFeedbackWithAI(customerText) {
     }
 }
 
-// ค่าเริ่มต้นกรณีเรียก AI ไม่สำเร็จ (ปรับระบบดักจับคำให้ตรงเป้าหมาย)
+// ค่าเริ่มต้นกรณีเรียก AI ไม่สำเร็จ
 function getDefaultAnalysis(text) {
     const textLower = text.toLowerCase();
-    // เพิ่มคำดักจับเรื่องความร้อน โรงภาพยนตร์ และแอร์
     const isCriticalIssue = ['ร้อน', 'แอร์', 'อบอ้าว', 'พัง', 'เสีย', 'เหม็น', 'ช้ามาก', 'ห่วย'].some(keyword => textLower.includes(keyword));
 
     if (isCriticalIssue) {
@@ -104,43 +101,43 @@ function getDefaultAnalysis(text) {
     };
 }
 
-// ฟังก์ชันแปลงระดับความเร่งด่วนเป็น Emoji และการเน้นข้อความ
+// ฟังก์ชันแปลงระดับความเร่งด่วนเป็น Emoji
 function getUrgencyEmoji(urgency) {
     switch (urgency) {
-        case 'Critical': return '🚨🚨 *CRITICAL (ด่วนที่สุด)*';
-        case 'High': return '🔴 *HIGH (ด่วนมาก)*';
-        case 'Medium': return '🟠 *MEDIUM (ปานกลาง)*';
-        case 'Low': return '🟢 *LOW (ทั่วไป)*';
-        default: return '⚪ *NORMAL*';
+        case 'Critical': return '🚨🚨 CRITICAL (ด่วนที่สุด)';
+        case 'High': return '🔴 HIGH (ด่วนมาก)';
+        case 'Medium': return '🟠 MEDIUM (ปานกลาง)';
+        case 'Low': return '🟢 LOW (ทั่วไป)';
+        default: return '⚪ NORMAL';
     }
 }
 
-// ฟังก์ชันส่งแจ้งเตือนเข้า Telegram
+// ฟังก์ชันส่งแจ้งเตือนเข้า Telegram (ปรับให้รองรับ Plain Text หรือ HTML ป้องกัน Syntax Error)
 async function sendTelegramAlert(customerText, formattedDate, analysis) {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     const chatId = process.env.TELEGRAM_CHAT_ID;
 
     if (!token || !chatId) {
-        console.warn('⚠️ ไม่พบ TELEGRAM_BOT_TOKEN หรือ TELEGRAM_CHAT_ID');
+        console.warn('⚠️ ไม่พบ TELEGRAM_BOT_TOKEN หรือ TELEGRAM_CHAT_ID ในระบบ');
         return;
     }
 
     const urgencyTag = getUrgencyEmoji(analysis.urgency);
 
-    const message = `📥 *แจ้งเตือน Feedback ใหม่จากลูกค้า!*
+    const message = `📥 <b>แจ้งเตือน Feedback ใหม่จากลูกค้า!</b>
 
-📌 *ข้อความที่ได้รับ:* 
+📌 <b>ข้อความที่ได้รับ:</b> 
 "${customerText}"
 
-🤖 *ผลการวิเคราะห์โดย AI:*
-• *ความรู้สึก:* ${analysis.sentiment}
-• *ระดับความเร่งด่วน:* ${urgencyTag}
-• *หมวดหมู่:* ${analysis.category}
-• *สรุปประเด็น:* ${analysis.summary}
-💡 *คำแนะนำการดำเนินการ:* ${analysis.action_recommendation}
+🤖 <b>ผลการวิเคราะห์โดย AI:</b>
+• <b>ความรู้สึก:</b> ${analysis.sentiment}
+• <b>ระดับความเร่งด่วน:</b> ${urgencyTag}
+• <b>หมวดหมู่:</b> ${analysis.category}
+• <b>สรุปประเด็น:</b> ${analysis.summary}
+💡 <b>คำแนะนำการดำเนินการ:</b> ${analysis.action_recommendation}
 
-📅 *วันที่และเวลา:* ${formattedDate}
-📍 *สถานที่:* สาขากาฬสินธุ์`;
+📅 <b>วันที่และเวลา:</b> ${formattedDate}
+📍 <b>สถานที่:</b> สาขากาฬสินธุ์`;
 
     try {
         const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -149,13 +146,15 @@ async function sendTelegramAlert(customerText, formattedDate, analysis) {
             body: JSON.stringify({
                 chat_id: chatId,
                 text: message,
-                parse_mode: 'Markdown'
+                parse_mode: 'HTML' // เปลี่ยนเป็น HTML ป้องกัน Markdown parse error
             })
         });
 
         const data = await response.json();
         if (!data.ok) {
-            console.error('❌ Telegram Error:', data);
+            console.error('❌ Telegram API Error:', data);
+        } else {
+            console.log('✅ ส่งแจ้งเตือนไปยัง Telegram เรียบร้อยแล้ว');
         }
     } catch (err) {
         console.error('❌ Fetch Error Telegram:', err);
@@ -183,13 +182,15 @@ app.post('/api/feedback', async (req, res) => {
             hour12: false
         }) + ' น.';
 
-        // 1. วิเคราะห์ด้วย AI (พร้อมระบบป้องกันข้อผิดพลาด)
+        // 1. วิเคราะห์ด้วย AI
         const analysis = await analyzeFeedbackWithAI(text);
 
-        // 2. ส่งเข้า Telegram
-        await sendTelegramAlert(text, formattedDate, analysis);
+        // 2. เรียกส่ง Telegram แบบ Asynchronous (ไม่ต้อง await เพื่อไม่ให้ตัวเว็บรอนาน)
+        sendTelegramAlert(text, formattedDate, analysis).catch(err => 
+            console.error('❌ Telegram Async Error:', err)
+        );
 
-        // 3. ส่งข้อมูลกลับไปยังหน้าเว็บ Frontend
+        // 3. ส่งข้อมูลตอบกลับไปยัง Frontend ทันที
         return res.json({
             success: true,
             analysis: analysis
