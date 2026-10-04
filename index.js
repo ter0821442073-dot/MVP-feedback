@@ -8,10 +8,10 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// เริ่มต้น Gemini Client (ระบุ API Key ผ่าน process.env.GEMINI_API_KEY)
+// เริ่มต้น Gemini Client
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// ฟังก์ชันวิเคราะห์ Feedback ด้วย Gemini AI (ส่งผลลัพธ์แบบ JSON Schema)
+// ฟังก์ชันวิเคราะห์ Feedback ด้วย Gemini AI
 async function analyzeFeedback(customerText) {
     try {
         const response = await ai.models.generateContent({
@@ -52,9 +52,8 @@ async function analyzeFeedback(customerText) {
         return JSON.parse(response.text);
     } catch (error) {
         console.error('❌ AI Analysis Error:', error);
-        // หาก AI ขัดข้อง ให้ใช้ค่า Default เพื่อไม่ให้ระบบล่ม
         return {
-            sentiment: 'ไม่สามารถวิเคราะห์ได้',
+            sentiment: 'ปานกลาง (Neutral)',
             urgency: 'Normal',
             category: 'ข้อเสนอแนะทั่วไป',
             summary: customerText,
@@ -63,8 +62,36 @@ async function analyzeFeedback(customerText) {
     }
 }
 
+// ฟังก์ชันช่วยกำหนดสีและ Emoji ตามสถานะ Sentiment
+function getSentimentMetadata(sentimentStr) {
+    const text = (sentimentStr || '').toLowerCase();
+    
+    if (text.includes('บวก') || text.includes('positive')) {
+        return {
+            emoji: '🟢',
+            color: '#16a34a',      // สีข้อความเข้ม (อ่านง่ายบนพื้นขาว)
+            bg_color: '#dcfce7',   // สีพื้นหลังกล่อง (เขียวอ่อน)
+            border_color: '#bbf7d0'
+        };
+    } else if (text.includes('ลบ') || text.includes('negative')) {
+        return {
+            emoji: '🔴',
+            color: '#dc2626',      // สีแดงเข้ม (อ่านง่ายบนพื้นขาว)
+            bg_color: '#fee2e2',   // สีพื้นหลังกล่อง (แดงอ่อน)
+            border_color: '#fecaca'
+        };
+    } else {
+        return {
+            emoji: '🟡',
+            color: '#d97706',      // สีส้ม/น้ำตาลทอง (อ่านง่ายบนพื้นขาว)
+            bg_color: '#fef3c7',   // สีพื้นหลังกล่อง (ส้มอ่อน)
+            border_color: '#fde68a'
+        };
+    }
+}
+
 // ฟังก์ชันส่งแจ้งเตือนเข้า Telegram
-async function sendTelegramAlert(customerText, formattedDate, aiAnalysis) {
+async function sendTelegramAlert(customerText, formattedDate, aiAnalysis, sentimentMeta) {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     const chatId = process.env.TELEGRAM_CHAT_ID;
 
@@ -77,7 +104,7 @@ async function sendTelegramAlert(customerText, formattedDate, aiAnalysis) {
 "${customerText}"
 
 🤖 *ผลการวิเคราะห์โดย AI:*
-• *Sentiment:* ${aiAnalysis.sentiment}
+• *Sentiment:* ${sentimentMeta.emoji} ${aiAnalysis.sentiment}
 • *ระดับความเร่งด่วน:* ${urgencyEmoji} ${aiAnalysis.urgency}
 • *หมวดหมู่:* ${aiAnalysis.category}
 • *สรุปประเด็น:* ${aiAnalysis.summary}
@@ -130,19 +157,31 @@ app.post('/api/feedback', async (req, res) => {
         // 1. วิเคราะห์ข้อมูลด้วย AI
         const aiAnalysis = await analyzeFeedback(text);
 
-        // 2. ส่งแจ้งเตือนพร้อมผลวิเคราะห์เข้า Telegram
-        await sendTelegramAlert(text, formattedDate, aiAnalysis);
+        // 2. คำนวณสีและ Emoji สำหรับ Sentiment
+        const sentimentMeta = getSentimentMetadata(aiAnalysis.sentiment);
 
-        // 3. ตอบกลับ API ด้วยข้อมูลจริงจาก AI
+        // 3. ส่งแจ้งเตือนเข้า Telegram
+        await sendTelegramAlert(text, formattedDate, aiAnalysis, sentimentMeta);
+
+        // 4. ตอบกลับ API ด้วยข้อมูลจริงพร้อมรหัสสีสำหรับ Frontend
         res.json({
             success: true,
-            analysis: aiAnalysis
+            analysis: {
+                ...aiAnalysis,
+                sentiment_style: sentimentMeta // ส่งสี (color, bg_color, border_color) ไปให้หน้าบ้านใช้เปลี่ยนสีได้ทันที
+            }
         });
 
     } catch (error) {
         console.error('API Error Details:', error);
         res.status(500).json({ error: `เกิดข้อผิดพลาด: ${error.message}` });
     }
+});
+
+// กำหนด Port และสั่งเริ่มรัน Server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
 });
 
 export default app;
