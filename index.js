@@ -6,23 +6,44 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// ค่าเริ่มต้นกรณี AI ล้มเหลว หรือไม่ได้ใส่ API Key
+/**
+ * ค่าเริ่มต้นกรณี AI ล้มเหลว หรือไม่ได้ใส่ API Key
+ * [แก้ไขใน v3.8]: แยกหมวดหมู่อุณหภูมิ/สถานที่ ออกจากระบบฉายภาพและเสียงอย่างเด็ดขาด
+ */
 function getDefaultAnalysis(text) {
     const textLower = text.toLowerCase();
-    const isCritical = ['ร้อน', 'แอร์', 'หนาว', 'อบอ้าว', 'พัง', 'เสีย', 'เหม็น', 'ช้ามาก', 'ห่วย', 'กระตุก', 'ดับ'].some(k => textLower.includes(k));
+    
+    // ตรวจจับหมวดหมู่อุณหภูมิและแอร์
+    const isTemperature = ['หนาว', 'ร้อน', 'แอร์', 'อบอ้าว', 'เยือกเย็น', 'ปรับแอร์'].some(k => textLower.includes(k));
+    // ตรวจจับหมวดหมู่ระบบฉายและเสียง
+    const isAV = ['เสียง', 'ภาพ', 'จอ', 'ดัง', 'เบา', 'ซับ', 'ดับ', 'กระตุก', 'ไมค์'].some(k => textLower.includes(k));
+    // ตรวจจับความเร่งด่วน
+    const isCritical = isTemperature || isAV || ['พัง', 'เสีย', 'เหม็น', 'ช้ามาก', 'ห่วย'].some(k => textLower.includes(k));
+
+    let category = 'ทั่วไป / คำชม';
+    if (isTemperature) {
+        category = 'สภาพแวดล้อมและสถานที่ (อุณหภูมิ/แอร์)';
+    } else if (isAV) {
+        category = 'ระบบฉายและเสียง';
+    }
 
     return {
         sentiment: isCritical ? 'Negative' : 'Neutral',
         urgency: isCritical ? 'Critical' : 'Medium',
-        category: isCritical ? 'ระบบฉายและเสียง' : 'ทั่วไป / คำชม',
+        category: category,
         summary: text,
-        action_recommendation: isCritical 
-            ? 'ส่งทีมช่าง/เจ้าหน้าที่เข้าตรวจสอบระบบและพื้นที่ในโรงภาพยนตร์ด่วนที่สุด' 
-            : 'ตรวจสอบข้อความและพิจารณาดำเนินการตามความเหมาะสม'
+        action_recommendation: isTemperature
+            ? 'ประสานงานเจ้าหน้าที่ควบคุมระบบปรับอากาศ (HVAC) ตรวจสอบอุณหภูมิภายในโรงภาพยนตร์ด่วนที่สุด'
+            : isAV 
+                ? 'แจ้งทีมช่างเทคนิคประจำโรงภาพยนตร์เข้าตรวจสอบระบบภาพและเสียงด่วนที่สุด'
+                : 'ตรวจสอบข้อความและพิจารณาดำเนินการตามความเหมาะสม'
     };
 }
 
-// ฟังก์ชันเรียก AI วิเคราะห์ความคิดเห็น (บริบทโรงภาพยนตร์)
+/**
+ * ฟังก์ชันเรียก AI วิเคราะห์ความคิดเห็น (Cinema Context)
+ * [แก้ไขใน v3.8]: นิยามหมวดหมู่แบบแยกขาดระหว่าง แอร์/สถานที่ กับ ระบบภาพ/เสียง
+ */
 async function analyzeFeedbackWithAI(customerText) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
@@ -30,39 +51,36 @@ async function analyzeFeedbackWithAI(customerText) {
         return getDefaultAnalysis(customerText);
     }
 
-    const promptText = `คุณคือ AI วิเคราะห์ความคิดเห็นลูกค้าสำหรับธุรกิจโรงภาพยนตร์ (Cinema)
-หน้าที่ของคุณคืออ่านข้อความติชมจากลูกค้า และสกัดข้อมูลออกมาตามโครงสร้าง JSON ที่กำหนด
+    const promptText = `คุณคือ AI วิเคราะห์ความคิดเห็นลูกค้าสำหรับธุรกิจโรงภาพยนตร์ (Cinema Version 3.8)
+จำแนกหมวดหมู่และระดับความเร่งด่วนจากข้อความลูกค้า: "${customerText}"
 
-หมวดหมู่ที่ใช้ตอบ (category):
-1. "ระบบฉายและเสียง" (จอภาพ, ภาพเบลอ, สีเพี้ยน, เสียงเบา/ดังไป, ซับไตเติลหาย, แอร์ไม่เย็น/ร้อน)
-2. "ความสะอาดและสถานที่" (เบาะสกปรก, พื้นเหนียว, กลิ่นเหม็น, ห้องน้ำ, ขยะ)
-3. "อาหารและเครื่องดื่ม" (ป๊อปคอร์นเหนียว/เค็ม/เย็น, น้ำอัดลมไม่มีงวด, รอนาน, อาหารเสีย)
-4. "พนักงานและการบริการ" (พูดจาไม่ดี, ชักสีหน้า, คิดเงินผิด, แนะนำไม่ดี, แถวยาว)
-5. "ระบบตั๋วและแอปพลิเคชัน" (จองตั๋วไม่ได้, ตู้ตั๋วเสีย, ตัดเงินแต่ไม่ได้ตั๋ว, สแกนไม่ผ่าน)
-6. "พฤติกรรมลูกค้าท่านอื่น" (คุยเสียงดัง, เล่นโทรศัพท์, เอาเท้าพาด, เด็กร้องไห้)
-7. "ทั่วไป / คำชม" (ชมเชย, เสนอแนะทั่วไป)
+กฎการจำแนกหมวดหมู่ (category) ห้ามปะปนกันเด็ดขาด:
+1. "สภาพแวดล้อมและสถานที่ (อุณหภูมิ/แอร์)" -> ทุกอย่างที่เกี่ยวกับ แอร์, ร้อน, หนาวมาก, อบอ้าว, ความสะอาด, กลิ่นเหม็น, เบาะ, ห้องน้ำ, ขยะ
+2. "ระบบฉายและเสียง" -> เฉพาะเรื่อง จอภาพ, ภาพเบลอ, สีเพี้ยน, เสียงดังไป/เบาไป, ลำโพงแตก, หนังกระตุก, ซับไตเติล
+3. "อาหารและเครื่องดื่ม" -> ป๊อปคอร์น, น้ำอัดลม, รอนาน, อาหารเสีย
+4. "พนักงานและการบริการ" -> พนักงานพูดจาไม่ดี, ชักสีหน้า, คิดเงินผิด, แถวยาว
+5. "ระบบตั๋วและแอปพลิเคชัน" -> จองตั๋วไม่ได้, ตู้ตั๋วเสีย, ตัดเงินไม่ได้ตั๋ว
+6. "พฤติกรรมลูกค้าท่านอื่น" -> คุยเสียงดัง, เล่นโทรศัพท์, เอาเท้าพาด
+7. "ทั่วไป / คำชม" -> คำชมเชย, ข้อเสนอแนะทั่วไป
 
-กฎการวิเคราะห์ระดับความเร่งด่วน (urgency):
-- Critical: แอร์ดับ/ร้อนมาก, หนังกระตุก/ดับกลางคราว, ภาพ/เสียงเสีย, เพลิงไหม้/อันตราย, อาหารเสีย
-- High: ตัดเงินไม่ได้ตั๋ว, พนักงานพูดจาหยาบคายมาก, กลิ่นเหม็นรุนแรง, มีสิ่งแปลกปลอมในอาหาร
-- Medium: ป๊อปคอร์นเหนียว/ไม่อร่อย, แถวยาว, ลูกค้าคนอื่นส่งเสียงดัง
+ระดับความเร่งด่วน (urgency):
+- Critical: แอร์หนาวมาก/ร้อนมาก/ดับ, หนังดับ/กระตุก/ภาพเสียงเสีย, เพลิงไหม้, อาหารเสีย (กระทบการรับชมในโรงทันที)
+- High: ตัดเงินไม่ได้ตั๋ว, พนักงานพูดจาหยาบคาย, กลิ่นเหม็นรุนแรง
+- Medium: ป๊อปคอร์นเหนียว/ไม่อร่อย, แถวยาว, คนข้างๆ เสียงดัง
 - Low: คำชมเชย, ข้อเสนอแนะทั่วไป
 
-ตอบกลับเป็น JSON ภาษาไทย รูปแบบนี้เท่านั้น (ห้ามมีข้อความอื่นนอกวงเล็บปักกิ่ง):
+ตอบเป็น JSON ภาษาไทย รูปแบบนี้เท่านั้น:
 {
   "sentiment": "Positive" | "Neutral" | "Negative",
   "urgency": "Low" | "Medium" | "High" | "Critical",
-  "category": "ระบุชื่อหมวดหมู่จาก 7 ข้อด้านบน",
+  "category": "ระบุชื่อหมวดหมู่ให้ตรงตามกฎด้านบน",
   "summary": "สรุปใจความสำคัญใน 1 ประโยคสั้นๆ",
   "action_recommendation": "คำแนะนำสั้นๆ สำหรับผู้จัดการโรงหนังในการแก้ไขปัญหา"
-}
-
-ข้อความของลูกค้า: "${customerText}"`;
+}`;
 
     try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
 
-        // ใช้ Native fetch ของ Node.js v18+ บน Vercel
         const response = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -102,20 +120,21 @@ function getUrgencyText(urgency) {
 
 /**
  * ฟังก์ชันส่งแจ้งเตือนผ่าน LINE Messaging API (Push Message)
+ * [แก้ไขใน v3.8]: เพิ่ม Log รายละเอียดการส่ง และการจัดการ Response เพื่อแก้ปัญหาการส่งล้มเหลว
  */
 async function sendLinePushAlert(customerText, name, phone, formattedDate, analysis) {
     const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
     const targetId = process.env.LINE_TARGET_ID;
 
     if (!channelToken || !targetId) {
-        console.warn('⚠️ ไม่พบ LINE_CHANNEL_ACCESS_TOKEN หรือ LINE_TARGET_ID ในระบบ');
+        console.error('❌ LINE Alert Error: ไม่พบ LINE_CHANNEL_ACCESS_TOKEN หรือ LINE_TARGET_ID ใน Environment Variables');
         return;
     }
 
     const urgencyTag = getUrgencyText(analysis.urgency);
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
 
-    const messageText = `📥 แจ้งเตือน Feedback ใหม่! (โรงภาพยนตร์)
+    const messageText = `📥 แจ้งเตือน Feedback ใหม่! (Cinema v3.8)
 
 👤 ผู้ส่งข้อมูล: ${customerInfo}
 
@@ -137,10 +156,10 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${channelToken}`
+                'Authorization': `Bearer ${channelToken.trim()}`
             },
             body: JSON.stringify({
-                to: targetId,
+                to: targetId.trim(),
                 messages: [
                     {
                         type: 'text',
@@ -152,12 +171,12 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
 
         const data = await response.json();
         if (response.ok) {
-            console.log('✅ ส่งแจ้งเตือนผ่าน LINE Messaging API สำเร็จ!');
+            console.log('✅ ส่งแจ้งเตือนผ่าน LINE สำเร็จ:', data);
         } else {
-            console.error('❌ LINE API Error:', data);
+            console.error('❌ LINE API ตอบกลับข้อผิดพลาด:', response.status, data);
         }
     } catch (err) {
-        console.error('❌ LINE Network Error:', err);
+        console.error('❌ LINE Network Error:', err.message);
     }
 }
 
@@ -185,12 +204,10 @@ app.post('/api/feedback', async (req, res) => {
         // 1. วิเคราะห์ด้วย AI
         const analysis = await analyzeFeedbackWithAI(text);
 
-        // 2. ส่งแจ้งเตือนผ่าน LINE Messaging API (ทำงานแบบ Async)
-        sendLinePushAlert(text, name, phone, formattedDate, analysis).catch(err => 
-            console.error('❌ LINE Async Error:', err)
-        );
+        // 2. [แก้ไข v3.8]: ใส่ await เพื่อให้ Vercel รอให้การส่ง LINE เสร็จสิ้นก่อนปิด Process
+        await sendLinePushAlert(text, name, phone, formattedDate, analysis);
 
-        // 3. ตอบกลับหน้าเว็บทันที
+        // 3. ตอบกลับหน้าเว็บ
         return res.json({
             success: true,
             analysis: analysis
@@ -202,7 +219,7 @@ app.post('/api/feedback', async (req, res) => {
     }
 });
 
-// Endpoint สำหรับดึง Group ID โดยตอบกลับในแชทกลุ่มทันที
+// Endpoint สำหรับดึง Group ID ผ่าน Webhook
 app.post('/api/webhook', async (req, res) => {
     try {
         const events = req.body.events || [];
