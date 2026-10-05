@@ -7,14 +7,14 @@ const app = express();
 app.use(express.json());
 
 // ตัวแปรสำหรับจำสถานะ Feedback ที่แก้ไขแล้ว (In-Memory State)
-// Note: หาก Restart Server ข้อมูลในนี้จะล้างใหม่ ถ้าต้องการให้คงอยู่ถาวรแนะนำให้ต่อกับ Database หรือ Redis ครับ
+// Note: บน Vercel ค่านี้จะถูก Reset เมื่อเกิด Cold Start หรือ Re-deploy
 const resolvedTickets = new Set();
 
 /**
  * 1. ฟังก์ชัน Guardrail ขั้นสูงสุด (Version 6.4)
  */
 function applyGuardrail(analysis, text) {
-    const textLower = text.toLowerCase();
+    const textLower = (text || '').toLowerCase();
 
     // รายการคำชมเชยชัดเจน
     const positiveKeywords = ['ดีมาก', 'ดีเยี่ยม', 'ประทับใจ', 'ชมเชย', 'หล่อ', 'สวย', 'สุดยอด', 'น่ารัก', 'ยิ้มแย้ม', 'พูดจาดี', 'สะอาดมาก', 'หอม', 'อร่อย', 'บริการดี'];
@@ -132,7 +132,7 @@ function applyGuardrail(analysis, text) {
  * 2. ระบบจำแนกสำรอง (Fallback Algorithm)
  */
 function getDefaultAnalysis(text) {
-    const textLower = text.toLowerCase();
+    const textLower = (text || '').toLowerCase();
 
     const isPositive = ['ดีมาก', 'ดีเยี่ยม', 'ประทับใจ', 'ชมเชย', 'สุดยอด', 'สะอาด', 'หอม', 'กรอบ', 'พูดจาดี', 'ยิ้มแย้ม', 'น่ารัก'].some(k => textLower.includes(k));
     const isNegative = ['ไม่ค่อยดี', 'ไม่ดี', 'ไม่โอเค', 'ตะคอก', 'ตะโกน', 'ด่า', 'ขึ้นเสียง', 'หน้าบึ้ง', 'ชักสีหน้า', 'ไม่ยิ้ม', 'แย่', 'ห่วย', 'ช้า', 'พัง', 'เสีย', 'เหม็น', 'เหม็นอับ', 'อับ', 'สกปรก', 'หนาว', 'ร้อน', 'อบอ้าว', 'ไม่กรอบ', 'กระตุก', 'ดับ', 'ไม่ฉาย', 'มืด', 'ใช้ไม่ได้', 'ทำไม', 'ลืม', 'ไม่ปิด', 'สปอตไลท์', 'ไม่มีไฟ', 'ไม่มีเลย'].some(k => textLower.includes(k));
@@ -171,7 +171,7 @@ function getDefaultAnalysis(text) {
 }
 
 /**
- * 3. ฟังก์ชันเรียก AI วิเคราะห์ความคิดเห็น
+ * 3. ฟังก์ชันเรียก AI วิเคราะห์ความคิดเห็น (พร้อม Timeout 3.5 วินาที)
  */
 async function analyzeFeedbackWithAI(customerText) {
     const apiKey = process.env.GEMINI_API_KEY;
@@ -207,11 +207,18 @@ async function analyzeFeedbackWithAI(customerText) {
     try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
 
+        // ตั้งเวลาถอยหลัง 3.5 วินาที หาก AI ตอบช้า ให้ตัดบทใช้ Fallback ทันที ป้องกัน Vercel Timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3500);
+
         const response = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ contents: [{ parts: [{ text: promptText }] }] })
+            body: JSON.stringify({ contents: [{ parts: [{ text: promptText }] }] }),
+            signal: controller.signal
         });
+
+        clearTimeout(timeoutId);
 
         if (!response.ok) return getDefaultAnalysis(customerText);
 
@@ -226,6 +233,7 @@ async function analyzeFeedbackWithAI(customerText) {
         return applyGuardrail(parsed, customerText);
 
     } catch (err) {
+        console.warn('⚠️ Gemini Timeout/Error -> Switched to Fallback Rule');
         return getDefaultAnalysis(customerText);
     }
 }
@@ -241,13 +249,16 @@ function getUrgencyBadge(urgency) {
 }
 
 /**
- * 4. ฟังก์ชันส่ง LINE Push Alert ด้วย Flex Message
+ * 4. ฟังก์ชันส่ง LINE Push Alert ด้วย Flex Message (พร้อม Try...Catch และ Error Handling)
  */
 async function sendLinePushAlert(customerText, name, phone, formattedDate, analysis) {
-    const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-    const targetId = process.env.LINE_TARGET_ID;
+    const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN?.trim();
+    const targetId = process.env.LINE_TARGET_ID?.trim();
 
-    if (!channelToken || !targetId) return;
+    if (!channelToken || !targetId) {
+        console.error('❌ Missing LINE API Token or Target ID in environment variables');
+        return false;
+    }
 
     const urgencyInfo = getUrgencyBadge(analysis.urgency);
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
@@ -347,7 +358,6 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
                         action: {
                             type: "postback",
                             label: "☑ ทำการแก้ไขแล้ว",
-                            // ส่งทั้ง ticket_id และ feedback_text ผ่าน postback data
                             data: `action=resolve&ticket_id=${ticketId}&feedback_text=${encodeURIComponent(customerText)}`,
                             displayText: `รับทราบ/ทำการแก้ไข Feedback เรียบร้อยแล้ว`
                         },
@@ -361,19 +371,28 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
     };
 
     try {
-        await fetch('https://api.line.me/v2/bot/message/push', {
+        const response = await fetch('https://api.line.me/v2/bot/message/push', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${channelToken.trim()}`
+                'Authorization': `Bearer ${channelToken}`
             },
             body: JSON.stringify({
-                to: targetId.trim(),
+                to: targetId,
                 messages: [flexPayload]
             })
         });
+
+        if (!response.ok) {
+            const errBody = await response.text();
+            console.error('❌ LINE API Rejected Push:', errBody);
+            return false;
+        }
+
+        return true;
     } catch (err) {
-        console.error('❌ LINE Alert Error:', err.message);
+        console.error('❌ Network Error while sending LINE Push Alert:', err.message);
+        return false;
     }
 }
 
@@ -381,7 +400,9 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
 app.post('/api/feedback', async (req, res) => {
     try {
         const { text, name, phone } = req.body;
-        if (!text) return res.status(400).json({ error: 'กรุณากรอกข้อความ Feedback' });
+        if (!text || !text.trim()) {
+            return res.status(400).json({ error: 'กรุณากรอกข้อความ Feedback' });
+        }
 
         const now = new Date();
         const formattedDate = now.toLocaleString('th-TH', {
@@ -391,10 +412,15 @@ app.post('/api/feedback', async (req, res) => {
         }) + ' น.';
 
         const analysis = await analyzeFeedbackWithAI(text);
-        await sendLinePushAlert(text, name, phone, formattedDate, analysis);
+        const lineSuccess = await sendLinePushAlert(text, name, phone, formattedDate, analysis);
 
-        return res.json({ success: true, analysis: analysis });
+        return res.json({ 
+            success: true, 
+            line_sent: lineSuccess,
+            analysis: analysis 
+        });
     } catch (error) {
+        console.error('❌ Error inside /api/feedback:', error.message);
         return res.status(500).json({ error: `เกิดข้อผิดพลาด: ${error.message}` });
     }
 });
@@ -402,7 +428,9 @@ app.post('/api/feedback', async (req, res) => {
 // Endpoint สำหรับ Webhook LINE (รับทั้ง ข้อความ และ ปุ่มกด Postback)
 app.post('/api/webhook', async (req, res) => {
     try {
+        const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN?.trim();
         const events = req.body.events || [];
+
         for (const event of events) {
             
             // 1. กรณีแอดมินกดปุ่ม "☑️ ทำการแก้ไขแล้ว" (Postback Event)
@@ -412,7 +440,7 @@ app.post('/api/webhook', async (req, res) => {
                 const ticketId = postbackData.get('ticket_id');
                 const feedbackText = postbackData.get('feedback_text') || '';
 
-                if (replyToken) {
+                if (replyToken && channelToken) {
                     let updateMessage = '';
 
                     // เช็กว่าเคสนี้ถูกกดแก้ไขไปแล้วหรือยัง
@@ -431,7 +459,7 @@ app.post('/api/webhook', async (req, res) => {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`
+                            'Authorization': `Bearer ${channelToken}`
                         },
                         body: JSON.stringify({
                             replyToken: replyToken,
@@ -448,12 +476,12 @@ app.post('/api/webhook', async (req, res) => {
             if (event.type === 'message' && event.message.type === 'text') {
                 const groupId = event.source.groupId;
                 const replyToken = event.replyToken;
-                if (groupId && replyToken && event.message.text.includes('id')) {
+                if (groupId && replyToken && event.message.text.toLowerCase().includes('id') && channelToken) {
                     await fetch('https://api.line.me/v2/bot/message/reply', {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`
+                            'Authorization': `Bearer ${channelToken}`
                         },
                         body: JSON.stringify({
                             replyToken: replyToken,
@@ -465,6 +493,7 @@ app.post('/api/webhook', async (req, res) => {
         }
         return res.status(200).send('OK');
     } catch (err) {
+        console.error('❌ Webhook Error:', err.message);
         return res.status(200).send('OK');
     }
 });
