@@ -7,24 +7,23 @@ const app = express();
 app.use(express.json());
 
 /**
- * 1. ฟังก์ชัน Guardrail ขั้นสูงสุด (Version 6.0)
- * ตรวจจับคำติเชิงคุณภาพ (เช่น ไม่ค่อยดี, ไม่ค่อยโอเค, ช้าไปนิด, บริการไม่ประทับใจ)
+ * 1. ฟังก์ชัน Guardrail ขั้นสูงสุด (Version 6.1 - Fixed Dark/Coupon Issues)
  */
 function applyGuardrail(analysis, text) {
     const textLower = text.toLowerCase();
 
     // รายการคำชมเชยชัดเจน
-    const positiveKeywords = ['ดีมาก', 'ดีเยี่ยม', 'ประทับใจ', 'ชมเชย', 'หล่อ', 'สวย','สุดยอด', 'น่ารัก', 'ยิ้มแย้ม', 'พูดจาดี', 'สะอาดมาก', 'หอม', 'อร่อย', 'บริการดี'];
+    const positiveKeywords = ['ดีมาก', 'ดีเยี่ยม', 'ประทับใจ', 'ชมเชย', 'หล่อ', 'สวย', 'สุดยอด', 'น่ารัก', 'ยิ้มแย้ม', 'พูดจาดี', 'สะอาดมาก', 'หอม', 'อร่อย', 'บริการดี'];
     
-    // รายการปฏิเสธ / คำติเชิงคุณภาพทุกประเภท
+    // รายการคำติ / เชิงลบทุกประเภท
     const negativeKeywords = [
         // คำติเชิงพนักงานและการบริการ
         'ไม่ค่อยดี', 'ไม่ดี', 'ไม่โอเค', 'ไม่น่ารัก', 'ไม่ยิ้ม', 'ไม่ประทับใจ', 'ไม่สุภาพ', 'ไม่แนะนำ', 'พนักงานน้อย', 
         'ตะคอก', 'ตะโกน', 'ด่า', 'ขึ้นเสียง', 'หน้าบึ้ง', 'ชักสีหน้า', 'พูดจาแย่', 'พูดจาหยาบคาย', 'พนักงานไม่พอ', 
         'มารยาทแย่', 'มารยาทไม่ดี', 'บริการแย่', 'บริการห่วย', 'ช้า', 'คิดเงินผิด', 'แถวยาว',
-        // คำติทั่วไป/สถานที่/อุปกรณ์
-        'แย่', 'ห่วย', 'พัง', 'เสีย', 'เหม็น', 'สกปรก', 'หนาว', 'ร้อน', 'อบอ้าว', 'ไม่ปิดไฟ', 'คูปองใช้ไม่ได้',  
-        'ไม่กรอบ', 'เหนียว', 'เค็ม', 'กระตุก', 'ดับ', 'มืด', 'ไม่สว่าง', 'ไม่ฉาย', 'จอดำ', 'อับ', 'ไม่มีเสียง'
+        // คำติทั่วไป / สถานที่ / อุปกรณ์ / ระบบ light & ticket
+        'แย่', 'ห่วย', 'พัง', 'เสีย', 'เหม็น', 'สกปรก', 'หนาว', 'ร้อน', 'อบอ้าว', 'ไม่ปิดไฟ', 'คูปองใช้ไม่ได้', 'ใช้ไม่ได้', 'ใช้ไม่ได้เลย', 'ทำไมใช้ไม่ได้',
+        'ไม่กรอบ', 'เหนียว', 'เค็ม', 'กระตุก', 'ดับ', 'มืด', 'มืดมาก', 'ไม่สว่าง', 'ไม่ฉาย', 'จอดำ', 'อับ', 'ไม่มีเสียง', 'ทำไมถึง'
     ];
 
     const hasPositive = positiveKeywords.some(k => textLower.includes(k));
@@ -33,9 +32,8 @@ function applyGuardrail(analysis, text) {
     // ตรวจสอบว่าเป็นเรื่องพนักงานและการบริการหรือไม่
     const isStaffIssue = ['พนักงาน', 'บริการ', 'แนะนำ', 'ตะคอก', 'ตะโกน', 'ด่า', 'ขึ้นเสียง', 'หน้าบึ้ง', 'ชักสีหน้า', 'ไม่ยิ้ม', 'พูดจา', 'มารยาท', 'เคาน์เตอร์'].some(k => textLower.includes(k));
 
-    // กฎที่ 1: หากเป็นเรื่องพนักงานแล้วพบคำติ/ปฏิเสธ (เช่น ไม่ค่อยดี, ไม่ประทับใจ) -> บังคับ Negative + High Urgency
+    // กฎที่ 1: เรื่องพนักงานแล้วพบคำติ/ปฏิเสธ
     if (isStaffIssue && (hasNegative || textLower.includes('ไม่'))) {
-        // ยกเว้นกรณีที่เป็นคำชม เช่น "บริการไม่ช้า" หรือ "พนักงานไม่หน้าบึ้ง"
         if (!hasPositive || textLower.includes('ไม่ค่อยดี') || textLower.includes('ไม่ดี') || textLower.includes('ไม่ค่อย')) {
             analysis.sentiment = 'Negative';
             analysis.urgency = 'High';
@@ -45,7 +43,51 @@ function applyGuardrail(analysis, text) {
         }
     }
 
-    // กฎที่ 2: มีคำชมชัดเจนและไม่มีคำติ -> บังคับ Positive + Low Urgency
+    // กฎที่ 2: เรื่องคูปอง / ตั๋ว / โปรโมชัน / ใช้ไม่ได้
+    if (['คูปอง', 'สิทธิ์', 'วอชเชอร์', 'voucher', 'ตั๋ว', 'แอป', 'ตู้สแกน', 'สแกน', 'โปรโมชัน'].some(k => textLower.includes(k))) {
+        analysis.category = 'ระบบตั๋วและแอปพลิเคชัน';
+        if (hasNegative || textLower.includes('ใช้ไม่ได้') || textLower.includes('ไม่') || textLower.includes('ทำไม')) {
+            analysis.sentiment = 'Negative';
+            analysis.urgency = 'High';
+            analysis.action_recommendation = 'ประสานงานทีมไอที/หน้าเคาน์เตอร์ตรวจสอบเงื่อนไขคูปองและระบบออกตั๋วด่วน';
+            return analysis;
+        }
+    }
+
+    // กฎที่ 3: หนังไม่ฉาย / จอดำ / ไฟดับ / ไฟในโรงภาพยนตร์ (มืดมาก, ไม่สว่าง)
+    if (['หนังไม่ฉาย', 'ไม่ฉาย', 'จอดำ', 'ไม่มีเสียง', 'ไฟดับ', 'ไฟ', 'มืด'].some(k => textLower.includes(k))) {
+        analysis.category = 'ระบบฉายและเสียง';
+        if (hasNegative || ['มืด', 'ดับ', 'จอดำ', 'ไม่ฉาย'].some(k => textLower.includes(k))) {
+            analysis.sentiment = 'Negative';
+            analysis.urgency = textLower.includes('มืด') ? 'Medium' : 'Critical';
+            analysis.action_recommendation = 'แจ้งช่างเทคนิคและผู้จัดการโรงภาพยนตร์เข้าตรวจสอบระบบแสงสว่าง/การฉายในโรงภาพยนตร์ทันที';
+            return analysis;
+        }
+    }
+
+    // กฎที่ 4: แอร์หนาว / ร้อน
+    if (['แอร์', 'หนาว', 'ร้อน', 'อบอ้าว'].some(k => textLower.includes(k)) && !textLower.includes('เสียง')) {
+        analysis.category = 'ระบบปรับอากาศ (แอร์)';
+        if (hasNegative || ['หนาว', 'ร้อน', 'อบอ้าว'].some(k => textLower.includes(k))) {
+            analysis.sentiment = 'Negative';
+            analysis.urgency = 'High';
+            analysis.action_recommendation = 'ประสานงานช่างอาคารเข้าตรวจสอบและปรับอุณหภูมิเครื่องปรับอากาศด่วน';
+        }
+        return analysis;
+    }
+
+    // กฎที่ 5: ห้องน้ำ / ความสะอาด
+    if (['ห้องน้ำ', 'เหม็น', 'สกปรก', 'ขยะ'].some(k => textLower.includes(k))) {
+        analysis.category = 'ความสะอาดและสถานที่';
+        if (hasNegative || ['เหม็น', 'สกปรก'].some(k => textLower.includes(k))) {
+            analysis.sentiment = 'Negative';
+            analysis.urgency = 'High';
+            analysis.action_recommendation = 'แจ้งแม่บ้าน/ทีมทำความสะอาดเข้าตรวจสอบและจัดการความสะอาดทันที';
+        }
+        return analysis;
+    }
+
+    // กฎที่ 6: คำชมชัดเจน และไม่มีคำติ
     if (hasPositive && !hasNegative) {
         analysis.sentiment = 'Positive';
         analysis.urgency = 'Low';
@@ -62,35 +104,10 @@ function applyGuardrail(analysis, text) {
         return analysis;
     }
 
-    // กฎที่ 3: หนังไม่ฉาย / จอดำ / ไฟดับ -> บังคับ Critical + Negative
-    if (['หนังไม่ฉาย', 'ไม่ฉาย', 'จอดำ', 'ไม่มีเสียง', 'ไฟดับ'].some(k => textLower.includes(k))) {
+    // กฎบังคับแก้กรณี AI ตอบ Neutral แต่มีคำ Negative ติดอยู่
+    if (hasNegative && analysis.sentiment === 'Neutral') {
         analysis.sentiment = 'Negative';
-        analysis.urgency = 'Critical';
-        analysis.category = 'ระบบฉายและเสียง';
-        analysis.action_recommendation = '🚨 แจ้งช่างเทคนิคและผู้จัดการโรงภาพยนตร์เข้าตรวจสอบห้องควบคุมการฉาย (Projection Room) ทันที!';
-        return analysis;
-    }
-
-    // กฎที่ 4: แอร์หนาว / ร้อน -> บังคับ ระบบปรับอากาศ
-    if (['แอร์', 'หนาว', 'ร้อน', 'อบอ้าว'].some(k => textLower.includes(k)) && !textLower.includes('เสียง')) {
-        analysis.category = 'ระบบปรับอากาศ (แอร์)';
-        if (hasNegative || ['หนาว', 'ร้อน', 'อบอ้าว'].some(k => textLower.includes(k))) {
-            analysis.sentiment = 'Negative';
-            analysis.urgency = 'Critical';
-            analysis.action_recommendation = 'ประสานงานช่างอาคารเข้าตรวจสอบและปรับอุณหภูมิเครื่องปรับอากาศด่วน';
-        }
-        return analysis;
-    }
-
-    // กฎที่ 5: ห้องน้ำ / ความสะอาด -> บังคับ ความสะอาดและสถานที่
-    if (['ห้องน้ำ', 'เหม็น', 'สกปรก', 'ขยะ'].some(k => textLower.includes(k))) {
-        analysis.category = 'ความสะอาดและสถานที่';
-        if (hasNegative || ['เหม็น', 'สกปรก'].some(k => textLower.includes(k))) {
-            analysis.sentiment = 'Negative';
-            analysis.urgency = 'High';
-            analysis.action_recommendation = 'แจ้งแม่บ้าน/ทีมทำความสะอาดเข้าตรวจสอบและจัดการความสะอาดทันที';
-        }
-        return analysis;
+        analysis.urgency = 'Medium';
     }
 
     return analysis;
@@ -103,20 +120,22 @@ function getDefaultAnalysis(text) {
     const textLower = text.toLowerCase();
 
     const isPositive = ['ดีมาก', 'ดีเยี่ยม', 'ประทับใจ', 'ชมเชย', 'สุดยอด', 'สะอาด', 'หอม', 'กรอบ', 'พูดจาดี', 'ยิ้มแย้ม', 'น่ารัก'].some(k => textLower.includes(k));
-    const isNegative = ['ไม่ค่อยดี', 'ไม่ดี', 'ไม่โอเค', 'ตะคอก', 'ตะโกน', 'ด่า', 'ขึ้นเสียง', 'หน้าบึ้ง', 'ชักสีหน้า', 'ไม่ยิ้ม', 'แย่', 'ห่วย', 'ช้า', 'พัง', 'เสีย', 'เหม็น', 'สกปรก', 'หนาว', 'ร้อน', 'อบอ้าว', 'ไม่กรอบ', 'กระตุก', 'ดับ', 'ไม่ฉาย'].some(k => textLower.includes(k));
+    const isNegative = ['ไม่ค่อยดี', 'ไม่ดี', 'ไม่โอเค', 'ตะคอก', 'ตะโกน', 'ด่า', 'ขึ้นเสียง', 'หน้าบึ้ง', 'ชักสีหน้า', 'ไม่ยิ้ม', 'แย่', 'ห่วย', 'ช้า', 'พัง', 'เสีย', 'เหม็น', 'สกปรก', 'หนาว', 'ร้อน', 'อบอ้าว', 'ไม่กรอบ', 'กระตุก', 'ดับ', 'ไม่ฉาย', 'มืด', 'ใช้ไม่ได้', 'ทำไม'].some(k => textLower.includes(k));
 
     let category = 'ทั่วไป / คำชม';
     let action = 'ขอบคุณสำหรับข้อเสนอแนะ และจะนำไปพัฒนาปรับปรุงการให้บริการต่อไป';
 
     if (['พนักงาน', 'บริการ', 'แนะนำ', 'ตะคอก', 'ด่า', 'ขึ้นเสียง'].some(k => textLower.includes(k))) {
         category = 'พนักงานและการบริการ';
+    } else if (['คูปอง', 'สิทธิ์', 'วอชเชอร์', 'ตั๋ว', 'แอป'].some(k => textLower.includes(k))) {
+        category = 'ระบบตั๋วและแอปพลิเคชัน';
     } else if (['ห้องน้ำ', 'เหม็น', 'สกปรก', 'ขยะ'].some(k => textLower.includes(k))) {
         category = 'ความสะอาดและสถานที่';
     } else if (['แอร์', 'หนาว', 'ร้อน', 'อบอ้าว'].some(k => textLower.includes(k))) {
         category = 'ระบบปรับอากาศ (แอร์)';
     } else if (['ป๊อปคอร์น', 'ป็อบคอร์น', 'น้ำอัดลม', 'ขนม', 'อาหาร'].some(k => textLower.includes(k))) {
         category = 'อาหารและเครื่องดื่ม';
-    } else if (['หนัง', 'เสียง', 'ภาพ', 'จอ', 'ซับ', 'ลำโพง', 'ฉาย'].some(k => textLower.includes(k))) {
+    } else if (['หนัง', 'เสียง', 'ภาพ', 'จอ', 'ซับ', 'ลำโพง', 'ฉาย', 'ไฟ', 'มืด'].some(k => textLower.includes(k))) {
         category = 'ระบบฉายและเสียง';
     }
 
@@ -144,16 +163,16 @@ async function analyzeFeedbackWithAI(customerText) {
 วิเคราะห์ข้อความนี้: "${customerText}"
 
 [กฎความรู้สึก (Sentiment & Urgency Rules)]:
-1. หากมีการติพนักงาน เช่น "แนะนำไม่ค่อยดี", "พูดจาไม่ดี", "บริการช้า", "หน้าบึ้ง", "ตะคอก" -> บังคับ sentiment: "Negative", urgency: "High", category: "พนักงานและการบริการ"
-2. คำว่า "ไม่ค่อยดี", "ไม่โอเค", "ไม่ค่อยประทับใจ" ถือเป็น Negative เสมอ (ห้ามตอบ Neutral เด็ดขาด!)
+1. หากเป็นการติ พ้องความหมายกับการต่อว่า บ่น หรือคำถามเชิงลบ เช่น "ใช้ไม่ได้", "ทำไมถึง...", "มืดมาก", "แนะนำไม่ค่อยดี", "พูดจาไม่ดี", "บริการช้า" -> บังคับ sentiment: "Negative"
+2. ห้ามตอบ "Neutral" สำหรับข้อความที่เป็นการร้องเรียน ปัญหา หรือการถามประชดประชันเด็ดขาด!
 
 [หมวดหมู่ (category)]:
 - "พนักงานและการบริการ": เรื่องพนักงาน, การบริการ, การแนะนำ, คำชมพนักงาน, ตะคอก, ขึ้นเสียง, ชักสีหน้า
 - "ระบบปรับอากาศ (แอร์)": เรื่องแอร์, หนาว, ร้อน, อบอ้าว
 - "ความสะอาดและสถานที่": เรื่องห้องน้ำ, กลิ่นเหม็น, สกปรก, ขยะ
 - "อาหารและเครื่องดื่ม": เรื่องป๊อปคอร์น, น้ำ, ขนม, ไม่กรอบ, อร่อย
-- "ระบบฉายและเสียง": เรื่องหนังไม่ฉาย, จอดำ, ภาพเบลอ, เสียงเบา/ดัง, ลำโพง
-- "ระบบตั๋วและแอปพลิเคชัน": เรื่องจองตั๋ว, แอป, ตู้สแกน
+- "ระบบฉายและเสียง": เรื่องหนังไม่ฉาย, จอดำ, ภาพเบลอ, เสียงเบา/ดัง, ลำโพง, แสงสว่างในโรง, ไฟมืด
+- "ระบบตั๋วและแอปพลิเคชัน": เรื่องจองตั๋ว, คูปอง, สิทธิ์, แอป, ตู้สแกน, ใช้คูปองไม่ได้
 - "ทั่วไป / คำชม": ข้อเสนอแนะทั่วไป
 
 ตอบเป็น JSON ภาษาไทย รูปแบบนี้เท่านั้น:
@@ -213,7 +232,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
     const urgencyTag = getUrgencyText(analysis.urgency);
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
 
-    const messageText = `📥 แจ้งเตือน Feedback ใหม่! (Cinema v6.0)
+    const messageText = `📥 แจ้งเตือน Feedback ใหม่! (Cinema v6.1)
 
 👤 ผู้ส่งข้อมูล: ${customerInfo}
 
