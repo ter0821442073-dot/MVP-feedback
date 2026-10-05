@@ -261,7 +261,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
                 contents: [
                     {
                         type: "text",
-                        text: `📢 แจ้งเตือน Feedback ใหม่ (v6.4)`,
+                        text: `📢 แจ้งเตือน Feedback`,
                         weight: "bold",
                         color: "#ffffff",
                         size: "sm"
