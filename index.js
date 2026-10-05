@@ -7,7 +7,7 @@ const app = express();
 app.use(express.json());
 
 /**
- * 1. ฟังก์ชัน Guardrail ขั้นสูงสุด (Version 6.4 - Fixed Action Recommendation & Missing Lights)
+ * 1. ฟังก์ชัน Guardrail ขั้นสูงสุด (Version 6.4)
  */
 function applyGuardrail(analysis, text) {
     const textLower = text.toLowerCase();
@@ -17,11 +17,9 @@ function applyGuardrail(analysis, text) {
     
     // รายการคำติ / เชิงลบทุกประเภท
     const negativeKeywords = [
-        // คำติเชิงพนักงานและการบริการ
         'ไม่ค่อยดี', 'ไม่ดี', 'ไม่โอเค', 'ไม่น่ารัก', 'ไม่ยิ้ม', 'ไม่ประทับใจ', 'ไม่สุภาพ', 'ไม่แนะนำ', 'พนักงานน้อย', 
         'ตะคอก', 'ตะโกน', 'ด่า', 'ขึ้นเสียง', 'หน้าบึ้ง', 'ชักสีหน้า', 'พูดจาแย่', 'พูดจาหยาบคาย', 'พนักงานไม่พอ', 
         'มารยาทแย่', 'มารยาทไม่ดี', 'บริการแย่', 'บริการห่วย', 'ช้า', 'คิดเงินผิด', 'แถวยาว', 'ลืม', 'ลืมปิด',
-        // คำติทั่วไป / สถานที่ / อุปกรณ์ / ระบบไฟ / กลิ่น
         'แย่', 'ห่วย', 'พัง', 'เสีย', 'เหม็น', 'เหม็นอับ', 'อับ', 'สกปรก', 'หนาว', 'ร้อน', 'อบอ้าว', 'ไม่ปิดไฟ', 'ไม่มีไฟ', 'คูปองใช้ไม่ได้', 'ใช้ไม่ได้', 'ใช้ไม่ได้เลย', 'ทำไมใช้ไม่ได้',
         'ไม่กรอบ', 'เหนียว', 'เค็ม', 'กระตุก', 'ดับ', 'มืด', 'มืดมาก', 'ไม่สว่าง', 'ไม่ฉาย', 'จอดำ', 'ไม่มีเสียง', 'ทำไมถึง', 'สปอตไลท์', 'ไม่มีเลย'
     ];
@@ -29,7 +27,6 @@ function applyGuardrail(analysis, text) {
     const hasPositive = positiveKeywords.some(k => textLower.includes(k));
     const hasNegative = negativeKeywords.some(k => textLower.includes(k));
 
-    // ตรวจสอบว่าเป็นเรื่องพนักงานและการบริการหรือไม่
     const isStaffIssue = ['พนักงาน', 'บริการ', 'แนะนำ', 'ตะคอก', 'ตะโกน', 'ด่า', 'ขึ้นเสียง', 'หน้าบึ้ง', 'ชักสีหน้า', 'ไม่ยิ้ม', 'พูดจา', 'มารยาท', 'เคาน์เตอร์', 'ลืม'].some(k => textLower.includes(k));
 
     // กฎที่ 1: พนักงานลืมปิดไฟ / ลืมบริการ
@@ -41,7 +38,7 @@ function applyGuardrail(analysis, text) {
         return analysis;
     }
 
-    // กฎที่ 2: พนักงานทำบริการไม่ดี / ขึ้นเสียง / ด่า
+    // กฎที่ 2: พนักงานทำบริการไม่ดี
     if (isStaffIssue && (hasNegative || textLower.includes('ไม่'))) {
         if (!hasPositive || textLower.includes('ไม่ค่อยดี') || textLower.includes('ไม่ดี') || textLower.includes('ไม่ค่อย')) {
             analysis.sentiment = 'Negative';
@@ -52,7 +49,7 @@ function applyGuardrail(analysis, text) {
         }
     }
 
-    // กฎที่ 3: ความสะอาด สถานที่ กลิ่นอับ และแสงสว่าง (เหม็นอับ, ไม่มีไฟ, มืด, ไม่สว่าง)
+    // กฎที่ 3: ความสะอาด สถานที่ กลิ่นอับ และแสงสว่าง
     if (['เหม็น', 'เหม็นอับ', 'อับ', 'สกปรก', 'ขยะ', 'ห้องน้ำ', 'ไฟ', 'มืด', 'สว่าง', 'ไม่มีไฟ'].some(k => textLower.includes(k)) && !textLower.includes('จอดำ') && !textLower.includes('หนัง')) {
         analysis.category = 'ความสะอาดและสถานที่';
         if (hasNegative || ['เหม็น', 'เหม็นอับ', 'อับ', 'มืด', 'ไม่มีไฟ', 'สกปรก'].some(k => textLower.includes(k))) {
@@ -79,7 +76,7 @@ function applyGuardrail(analysis, text) {
         }
     }
 
-    // กฎที่ 5: หนังไม่ฉาย / จอดำ / ไม่มีเสียง / ระบบการฉายจริง
+    // กฎที่ 5: หนังไม่ฉาย / จอดำ / ไม่มีเสียง
     if (['หนังไม่ฉาย', 'ไม่ฉาย', 'จอดำ', 'ไม่มีเสียง', 'เสียงเบา', 'ภาพเบลอ', 'ลำโพง', 'ซับ'].some(k => textLower.includes(k))) {
         analysis.category = 'ระบบฉายและเสียง';
         analysis.sentiment = 'Negative';
@@ -99,7 +96,7 @@ function applyGuardrail(analysis, text) {
         return analysis;
     }
 
-    // กฎที่ 7: คำชมชัดเจน และไม่มีคำติ
+    // กฎที่ 7: คำชมชัดเจน
     if (hasPositive && !hasNegative) {
         analysis.sentiment = 'Positive';
         analysis.urgency = 'Low';
@@ -116,7 +113,6 @@ function applyGuardrail(analysis, text) {
         return analysis;
     }
 
-    // กรณีเคสปัญหาทั่วไปที่ตกสำรวจ แต่พบคำติ
     if (hasNegative && analysis.sentiment === 'Neutral') {
         analysis.sentiment = 'Negative';
         analysis.urgency = 'High';
@@ -189,7 +185,7 @@ async function analyzeFeedbackWithAI(customerText) {
 [การจำแนกหมวดหมู่ (category)]:
 - "ความสะอาดและสถานที่": เรื่องกลิ่นเหม็น, เหม็นอับ, ไฟแสงสว่างในโรง, ไม่มีไฟ, ไฟมืด, ห้องน้ำ, ความสะอาด, เบาะ/เก้าอี้
 - "พนักงานและการบริการ": เรื่องพนักงาน, พนักงานลืม..., การบริการ, การแนะนำ, คำชมพนักงาน, ตะคอก, ขึ้นเสียง
-- "ระบบฉายและเสียง": เรื่องหนังไม่ฉาย, จอดำ, ภาพเบลอ, เสียงเบา/ดัง, ลำโพง, ซับไตเติล
+- "ระบบฉายและเสียง": เรื่องหนังไม่ฉาย, จอดำ, ภาพเบลอ, เสียงเบา/ดัง, ลลำโพง, ซับไตเติล
 - "ระบบปรับอากาศ (แอร์)": เรื่องแอร์, หนาว, ร้อน, อบอ้าว
 - "อาหารและเครื่องดื่ม": เรื่องป๊อปคอร์น, น้ำ, ขนม, ไม่กรอบ, อร่อย
 - "ระบบตั๋วและแอปพลิเคชัน": เรื่องจองตั๋ว, คูปอง, สิทธิ์, แอป, ตู้สแกน
@@ -230,18 +226,18 @@ async function analyzeFeedbackWithAI(customerText) {
     }
 }
 
-function getUrgencyText(urgency) {
+function getUrgencyBadge(urgency) {
     switch (urgency) {
-        case 'Critical': return '🚨🚨 CRITICAL (ด่วนที่สุด)';
-        case 'High': return '🔴 HIGH (ด่วนมาก)';
-        case 'Medium': return '🟠 MEDIUM (ปานกลาง)';
-        case 'Low': return '🟢 LOW (ทั่วไป)';
-        default: return '⚪ NORMAL';
+        case 'Critical': return { text: '🚨 CRITICAL', color: '#dc3545', headerBg: '#dc3545' };
+        case 'High': return { text: '🔴 HIGH', color: '#dc3545', headerBg: '#d9534f' };
+        case 'Medium': return { text: '🟠 MEDIUM', color: '#f0ad4e', headerBg: '#f0ad4e' };
+        case 'Low': return { text: '🟢 LOW', color: '#28a745', headerBg: '#1DB446' };
+        default: return { text: '⚪ NORMAL', color: '#6c757d', headerBg: '#6c757d' };
     }
 }
 
 /**
- * 4. ฟังก์ชันส่ง LINE Alert
+ * 4. ฟังก์ชันส่ง LINE Push Alert ด้วย Flex Message
  */
 async function sendLinePushAlert(customerText, name, phone, formattedDate, analysis) {
     const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
@@ -249,25 +245,113 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
 
     if (!channelToken || !targetId) return;
 
-    const urgencyTag = getUrgencyText(analysis.urgency);
+    const urgencyInfo = getUrgencyBadge(analysis.urgency);
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
+    const ticketId = Date.now().toString().slice(-6); // สุ่ม Ticket ID ย่อย
 
-    const messageText = `📥 แจ้งเตือน Feedback ใหม่! (Cinema v6.4)
-
-👤 ผู้ส่งข้อมูล: ${customerInfo}
-
-📌 ข้อความที่ได้รับ:
-"${customerText}"
-
-🤖 ผลการวิเคราะห์โดย AI:
-• ความรู้สึก: ${analysis.sentiment}
-• ระดับความเร่งด่วน: ${urgencyTag}
-• หมวดหมู่: ${analysis.category}
-• สรุปประเด็น: ${analysis.summary}
-💡 คำแนะนำ: ${analysis.action_recommendation}
-
-📅 วันที่และเวลา: ${formattedDate}
-📍 สถานที่: สาขากาฬสินธุ์`;
+    // สร้าง โครงสร้าง LINE Flex Message
+    const flexPayload = {
+        type: "flex",
+        altText: `📬 Feedback ใหม่: ${analysis.summary}`,
+        contents: {
+            type: "bubble",
+            header: {
+                type: "box",
+                layout: "vertical",
+                contents: [
+                    {
+                        type: "text",
+                        text: `📢 แจ้งเตือน Feedback ใหม่ (v6.4)`,
+                        weight: "bold",
+                        color: "#ffffff",
+                        size: "sm"
+                    },
+                    {
+                        type: "text",
+                        text: "Cinema • สาขากาฬสินธุ์",
+                        color: "#ffffffcc",
+                        size: "xs",
+                        margin: "xs"
+                    }
+                ],
+                backgroundColor: urgencyInfo.headerBg,
+                paddingAll: "md"
+            },
+            body: {
+                type: "box",
+                layout: "vertical",
+                contents: [
+                    {
+                        type: "box",
+                        layout: "horizontal",
+                        contents: [
+                            { type: "text", text: "👤 ผู้ส่ง:", size: "xs", color: "#8c8c8c", flex: 2 },
+                            { type: "text", text: customerInfo, size: "xs", color: "#111111", weight: "bold", flex: 5, wrap: true }
+                        ]
+                    },
+                    {
+                        type: "box",
+                        layout: "horizontal",
+                        contents: [
+                            { type: "text", text: "📅 เวลา:", size: "xs", color: "#8c8c8c", flex: 2 },
+                            { type: "text", text: formattedDate, size: "xs", color: "#111111", flex: 5 }
+                        ],
+                        margin: "xs"
+                    },
+                    { type: "separator", margin: "md" },
+                    {
+                        type: "box",
+                        layout: "vertical",
+                        contents: [
+                            { type: "text", text: "💬 ข้อความที่ได้รับ:", size: "xs", color: "#8c8c8c" },
+                            { type: "text", text: `"${customerText}"`, size: "sm", color: "#111111", weight: "bold", wrap: true, margin: "xs" }
+                        ],
+                        margin: "md",
+                        backgroundColor: "#f8f9fa",
+                        paddingAll: "md",
+                        cornerRadius: "md"
+                    },
+                    {
+                        type: "box",
+                        layout: "vertical",
+                        contents: [
+                            { type: "text", text: "🤖 ผลการวิเคราะห์โดย AI", size: "xs", color: "#111111", weight: "bold" },
+                            {
+                                type: "box",
+                                layout: "horizontal",
+                                contents: [
+                                    { type: "text", text: `Sentiment: ${analysis.sentiment}`, size: "xs", color: "#555555" },
+                                    { type: "text", text: urgencyInfo.text, size: "xs", color: urgencyInfo.color, align: "end", weight: "bold" }
+                                ],
+                                margin: "xs"
+                            },
+                            { type: "text", text: `🏷️ หมวดหมู่: ${analysis.category}`, size: "xs", color: "#555555", margin: "xs" },
+                            { type: "text", text: `💡 คำแนะนำ: ${analysis.action_recommendation}`, size: "xs", color: "#555555", wrap: true, margin: "xs" }
+                        ],
+                        margin: "md"
+                    }
+                ]
+            },
+            footer: {
+                type: "box",
+                layout: "vertical",
+                contents: [
+                    {
+                        type: "button",
+                        action: {
+                            type: "postback",
+                            label: "☑️️ ทำการแก้ไขแล้ว",
+                            data: `action=resolve&ticket_id=${ticketId}&category=${encodeURIComponent(analysis.category)}`,
+                            displayText: `รับทราบ/ทำการแก้ไข Feedback (#${ticketId}) เรียบร้อยแล้ว`
+                        },
+                        style: "primary",
+                        color: "#007bff",
+                        height: "sm"
+                    }
+                ]
+            }
+        }
+    };
 
     try {
         await fetch('https://api.line.me/v2/bot/message/push', {
@@ -278,7 +362,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
             },
             body: JSON.stringify({
                 to: targetId.trim(),
-                messages: [{ type: 'text', text: messageText }]
+                messages: [flexPayload]
             })
         });
     } catch (err) {
@@ -308,15 +392,44 @@ app.post('/api/feedback', async (req, res) => {
     }
 });
 
-// Endpoint สำหรับ Webhook LINE
+// Endpoint สำหรับ Webhook LINE (รับทั้ง ข้อความ และ ปุ่มกด Postback)
 app.post('/api/webhook', async (req, res) => {
     try {
         const events = req.body.events || [];
         for (const event of events) {
+            
+            // 1. กรณีแอดมินกดปุ่ม "☑️ ทำการแก้ไขแล้ว" (Postback Event)
+            if (event.type === 'postback') {
+                const replyToken = event.replyToken;
+                const postbackData = new URLSearchParams(event.postback.data);
+                const ticketId = postbackData.get('ticket_id') || '';
+                const category = postbackData.get('category') || '';
+
+                if (replyToken) {
+                    const now = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' });
+                    
+                    await fetch('https://api.line.me/v2/bot/message/reply', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`
+                        },
+                        body: JSON.stringify({
+                            replyToken: replyToken,
+                            messages: [{
+                                type: 'text',
+                                text: `✅ [อัปเดตสถานะ]\nFeedback ID: #${ticketId} (${decodeURIComponent(category)})\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`
+                            }]
+                        })
+                    });
+                }
+            }
+
+            // 2. กรณีพิมพ์ดึง Group ID
             if (event.type === 'message' && event.message.type === 'text') {
                 const groupId = event.source.groupId;
                 const replyToken = event.replyToken;
-                if (groupId && replyToken) {
+                if (groupId && replyToken && event.message.text.includes('id')) {
                     await fetch('https://api.line.me/v2/bot/message/reply', {
                         method: 'POST',
                         headers: {
