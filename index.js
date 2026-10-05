@@ -6,6 +6,10 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
+// ตัวแปรสำหรับจำสถานะ Feedback ที่แก้ไขแล้ว (In-Memory State)
+// Note: หาก Restart Server ข้อมูลในนี้จะล้างใหม่ ถ้าต้องการให้คงอยู่ถาวรแนะนำให้ต่อกับ Database หรือ Redis ครับ
+const resolvedTickets = new Set();
+
 /**
  * 1. ฟังก์ชัน Guardrail ขั้นสูงสุด (Version 6.4)
  */
@@ -247,8 +251,11 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
 
     const urgencyInfo = getUrgencyBadge(analysis.urgency);
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
+    
+    // สร้าง Ticket ID แบบสุ่ม เพื่อใช้อ้างอิงการบันทึกสถานะ
+    const ticketId = Date.now().toString().slice(-6);
 
-    // สร้าง โครงสร้าง LINE Flex Message
+    // โครงสร้าง LINE Flex Message
     const flexPayload = {
         type: "flex",
         altText: `📬 Feedback ใหม่: ${analysis.summary}`,
@@ -267,7 +274,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
                     },
                     {
                         type: "text",
-                        text: "MVP • สาขากาฬสินธุ์",
+                        text: "Cinema • สาขากาฬสินธุ์",
                         color: "#ffffffcc",
                         size: "xs",
                         margin: "xs"
@@ -340,8 +347,8 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
                         action: {
                             type: "postback",
                             label: "☑ ทำการแก้ไขแล้ว",
-                            // แนบข้อความลูกค้า (feedback_text) ไปใน postback data และตัด ID ออกจาก displayText
-                            data: `action=resolve&feedback_text=${encodeURIComponent(customerText)}`,
+                            // ส่งทั้ง ticket_id และ feedback_text ผ่าน postback data
+                            data: `action=resolve&ticket_id=${ticketId}&feedback_text=${encodeURIComponent(customerText)}`,
                             displayText: `รับทราบ/ทำการแก้ไข Feedback เรียบร้อยแล้ว`
                         },
                         style: "primary",
@@ -402,13 +409,23 @@ app.post('/api/webhook', async (req, res) => {
             if (event.type === 'postback') {
                 const replyToken = event.replyToken;
                 const postbackData = new URLSearchParams(event.postback.data);
+                const ticketId = postbackData.get('ticket_id');
                 const feedbackText = postbackData.get('feedback_text') || '';
 
                 if (replyToken) {
-                    const now = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' });
-                    
-                    // ปรับรูปแบบข้อความตอบกลับ: ตัด ID ออก และใส่ข้อความลูกค้าที่ได้รับแทนหมวดหมู่
-                    const updateMessage = `✅ [อัปเดตสถานะ]\nFeedback: "${decodeURIComponent(feedbackText)}"\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`;
+                    let updateMessage = '';
+
+                    // เช็กว่าเคสนี้ถูกกดแก้ไขไปแล้วหรือยัง
+                    if (ticketId && resolvedTickets.has(ticketId)) {
+                        updateMessage = `⚠️ [แจ้งเตือน]\nFeedback นี้ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`;
+                    } else {
+                        // บันทึกว่า ticketId นี้จบเคสแล้ว
+                        if (ticketId) {
+                            resolvedTickets.add(ticketId);
+                        }
+                        const now = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' });
+                        updateMessage = `✅ [อัปเดตสถานะ]\nFeedback: "${decodeURIComponent(feedbackText)}"\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`;
+                    }
 
                     await fetch('https://api.line.me/v2/bot/message/reply', {
                         method: 'POST',
