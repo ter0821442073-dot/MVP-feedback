@@ -7,8 +7,6 @@ const app = express();
 app.use(express.json());
 
 // ตัวแปรสำหรับจำสถานะ Feedback ที่แก้ไขแล้ว (In-Memory State)
-// Note: บน Vercel ค่านี้จะถูก Reset เมื่อเกิด Cold Start หรือ Re-deploy
-// กำหนดขนาดสูงสุดเพื่อป้องกัน Memory Leak
 const MAX_RESOLVED_TICKETS = 1000;
 const resolvedTickets = new Set();
 
@@ -21,7 +19,7 @@ function markTicketResolved(ticketId) {
 }
 
 /**
- * 1. ฟังก์ชัน Guardrail ขั้นสูงสุด (Version 6.6 - เพิ่มระบบดักจับน้ำอัดลมจืด/โค้กจืด)
+ * 1. ฟังก์ชัน Guardrail ขั้นสูงสุด (ปรับปรุงระบบแยกแยะ เครื่องดื่ม vs ป๊อปคอร์น)
  */
 function applyGuardrail(analysis, text) {
     const textLower = (text || '').toLowerCase();
@@ -48,7 +46,7 @@ function applyGuardrail(analysis, text) {
     if (isStaffIssue && (['ลืม', 'ไม่ปิด', 'ลืมปิด', 'สปอตไลท์'].some(k => textLower.includes(k)))) {
         analysis.sentiment = 'Negative';
         analysis.urgency = 'High';
-        analysis.category = 'อาหารและเครื่องดื่ม';
+        analysis.category = 'พนักงานและการบริการ';
         analysis.action_recommendation = 'แจ้งผู้จัดการสาขาเน้นย้ำและกำชับพนักงานตรวจสอบการปิดไฟ/สปอตไลท์ในโรงภาพยนตร์ก่อนเริ่มฉายทุกครั้ง';
         return analysis;
     }
@@ -64,17 +62,18 @@ function applyGuardrail(analysis, text) {
         }
     }
 
-    // กฎที่ 3: อาหารและเครื่องดื่ม (ป๊อปคอร์น, น้ำ, โค้ก, ขนม)
+    // กฎที่ 3: อาหารและเครื่องดื่ม (ปรับปรุงแก้ไขจุดนี้)
     if (['ป๊อปคอร์น', 'ป็อบคอร์น', 'น้ำอัดลม', 'น้ำโค้ก', 'โค้ก', 'เป๊ปซี่', 'น้ำส้ม', 'น้ำเขียว', 'น้ำแดง', 'น้ำสไปร์ท', 'น้ำ', 'ขนม', 'อาหาร', 'รสหวาน', 'รสเค็ม', 'ชีส'].some(k => textLower.includes(k))) {
         analysis.category = 'อาหารและเครื่องดื่ม';
         
-        const isDrinkIssue = ['จืด', 'เหมือนน้ำเปล่า', 'ไม่มีรสชาติ', 'เจือจาง', 'ไม่ซ่า', 'ไม่มีก๊าซ', 'จืดมาก'].some(k => textLower.includes(k));
+        const isDrink = ['น้ำอัดลม', 'น้ำโค้ก', 'โค้ก', 'เป๊ปซี่', 'น้ำส้ม', 'น้ำเขียว', 'น้ำแดง', 'น้ำสไปร์ท', 'น้ำ'].some(k => textLower.includes(k));
+        const isDrinkIssue = ['จืด', 'เหมือนน้ำเปล่า', 'ไม่มีรสชาติ', 'เจือจาง', 'ไม่ซ่า', 'ไม่มีก๊าซ', 'จืดมาก', 'ไม่อร่อย'].some(k => textLower.includes(k));
         
         if (hasNegative || isDrinkIssue || ['ไม่กรอบ', 'เหนียว', 'เค็ม', 'ไม่อร่อย', 'ไม่ซ่า', 'เหม็น', 'ช้า', 'เย็น', 'ชืด'].some(k => textLower.includes(k))) {
             analysis.sentiment = 'Negative';
             analysis.urgency = 'High';
             
-            if (isDrinkIssue) {
+            if (isDrink) {
                 analysis.action_recommendation = 'แจ้งทีมเคาน์เตอร์ตรวจสอบตู้กดน้ำ/หัวน้ำหวาน/ก๊าซ CO2 ทันที และเปลี่ยนแก้วใหม่ให้ลูกค้าด่วน';
             } else {
                 analysis.action_recommendation = 'แจ้งทีมเคาน์เตอร์อาหารตรวจสอบคุณภาพสินค้า เตาอบป๊อปคอร์น และเปลี่ยนชุดใหม่ให้ลูกค้าทันที';
@@ -180,8 +179,11 @@ function getDefaultAnalysis(text) {
         action = 'ประสานงานผู้จัดการสาขาตรวจสอบและปรับปรุงการบริการของพนักงาน';
     } else if (['ป๊อปคอร์น', 'ป็อบคอร์น', 'น้ำอัดลม', 'น้ำโค้ก', 'โค้ก', 'น้ำ', 'ขนม', 'อาหาร'].some(k => textLower.includes(k))) {
         category = 'อาหารและเครื่องดื่ม';
-        if (isNegative || ['จืด', 'เหมือนน้ำเปล่า'].some(k => textLower.includes(k))) {
-            action = 'แจ้งทีมเคาน์เตอร์อาหารตรวจสอบหัวน้ำหวาน/ตู้กดน้ำ และเปลี่ยนแก้วใหม่ให้ลูกค้าด่วน';
+        const isDrink = ['น้ำอัดลม', 'น้ำโค้ก', 'โค้ก', 'เป๊ปซี่', 'น้ำส้ม', 'น้ำเขียว', 'น้ำแดง', 'น้ำสไปร์ท', 'น้ำ'].some(k => textLower.includes(k));
+        if (isNegative || ['จืด', 'เหมือนน้ำเปล่า', 'ไม่อร่อย'].some(k => textLower.includes(k))) {
+            action = isDrink 
+                ? 'แจ้งทีมเคาน์เตอร์ตรวจสอบตู้กดน้ำ/หัวน้ำหวาน/ก๊าซ CO2 ทันที และเปลี่ยนแก้วใหม่ให้ลูกค้าด่วน' 
+                : 'แจ้งทีมเคาน์เตอร์อาหารตรวจสอบคุณภาพสินค้า เตาอบป๊อปคอร์น และเปลี่ยนชุดใหม่ให้ลูกค้าทันที';
         } else {
             action = 'ชื่นชมทีมเคาน์เตอร์อาหารและรักษาคุณภาพสินค้าต่อไป';
         }
@@ -223,11 +225,11 @@ async function analyzeFeedbackWithAI(customerText) {
 วิเคราะห์ข้อความนี้: "${customerText}"
 
 [กฎความรู้สึก (Sentiment & Urgency Rules)]:
-1. คำว่า "เหม็นอับ", "ไม่มีไฟ", "ไฟไม่มีเลย", "ลืมปิดไฟ", "ไม่ปิดไฟ", "ใช้ไม่ได้", "พนักงาน...", "ไม่กรอบ", "เหนียว", "จืด", "เหมือนน้ำเปล่า", "โค้กจืด" ถือเป็นข้อผิดพลาด/คำร้องเรียน บังคับ sentiment: "Negative" และ urgency: "High" เสมอ!
+1. คำว่า "เหม็นอับ", "ไม่มีไฟ", "ไฟไม่มีเลย", "ลืมปิดไฟ", "ไม่ปิดไฟ", "ใช้ไม่ได้", "พนักงาน...", "ไม่กรอบ", "เหนียว", "จืด", "เหมือนน้ำเปล่า", "โค้กจืด", "ไม่อร่อย" ถือเป็นข้อผิดพลาด/คำร้องเรียน บังคับ sentiment: "Negative" และ urgency: "High" เสมอ!
 2. ห้ามตอบ "Neutral" หรือ urgency "Low" สำหรับข้อความที่เป็นการร้องเรียน ปัญหา หรือความบกพร่องเด็ดขาด!
 
 [การจำแนกหมวดหมู่ (category)]:
-- "อาหารและเครื่องดื่ม": เรื่องป๊อปคอร์น, น้ำ, โค้ก, น้ำอัดลม, ขนม, จืด, เหมือนน้ำเปล่า, ไม่กรอบ, อร่อย, เหนียว, รสชาติ
+- "อาหารและเครื่องดื่ม": เรื่องป๊อปคอร์น, น้ำ, โค้ก, น้ำอัดลม, ขนม, จืด, เหมือนน้ำเปล่า, ไม่กรอบ, อร่อย, เหนียว, รสชาติ, ไม่อร่อย
 - "ความสะอาดและสถานที่": เรื่องกลิ่นเหม็น, เหม็นอับ, ไฟแสงสว่างในโรง, ไม่มีไฟ, ไฟมืด, ห้องน้ำ, ความสะอาด, เบาะ/เก้าอี้
 - "พนักงานและการบริการ": เรื่องพนักงาน, พนักงานลืม..., การบริการ, การแนะนำ, คำชมพนักงาน, ตะคอก, ขึ้นเสียง
 - "ระบบฉายและเสียง": เรื่องหนังไม่ฉาย, จอดำ, ภาพเบลอ, เสียงเบา/ดัง, ลำโพง, ซับไตเติล
@@ -302,7 +304,6 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
     const urgencyInfo = getUrgencyBadge(analysis.urgency);
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
     
-    // สร้าง Ticket ID แบบสุ่มตัวเลข 6 หลักเพื่อความเฉพาะเจาะจง
     const ticketId = `${Date.now().toString().slice(-4)}${Math.floor(10 + Math.random() * 90)}`;
 
     const flexPayload = {
@@ -396,7 +397,6 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
                         action: {
                             type: "postback",
                             label: "☑ ทำการแก้ไขแล้ว",
-                            // ส่งเฉพาะ action และ ticket_id เพื่อไม่ให้ความยาวของ string เกินโควต้า 300 ตัวอักษรของ LINE
                             data: `action=resolve&ticket_id=${ticketId}`,
                             displayText: `รับทราบ/ทำการแก้ไข Feedback (#${ticketId}) เรียบร้อยแล้ว`
                         },
