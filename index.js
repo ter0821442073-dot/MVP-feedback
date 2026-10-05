@@ -247,7 +247,6 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
 
     const urgencyInfo = getUrgencyBadge(analysis.urgency);
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
-    const ticketId = Date.now().toString().slice(-6); // สุ่ม Ticket ID ย่อย
 
     // สร้าง โครงสร้าง LINE Flex Message
     const flexPayload = {
@@ -340,9 +339,10 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
                         type: "button",
                         action: {
                             type: "postback",
-                            label: "☑️️ ทำการแก้ไขแล้ว",
-                            data: `action=resolve&ticket_id=${ticketId}&category=${encodeURIComponent(analysis.category)}`,
-                            displayText: `รับทราบ/ทำการแก้ไข Feedback (#${ticketId}) เรียบร้อยแล้ว`
+                            label: "☑ ทำการแก้ไขแล้ว",
+                            // แนบข้อความลูกค้า (feedback_text) ไปใน postback data และตัด ID ออกจาก displayText
+                            data: `action=resolve&feedback_text=${encodeURIComponent(customerText)}`,
+                            displayText: `รับทราบ/ทำการแก้ไข Feedback เรียบร้อยแล้ว`
                         },
                         style: "primary",
                         color: "#007bff",
@@ -402,12 +402,14 @@ app.post('/api/webhook', async (req, res) => {
             if (event.type === 'postback') {
                 const replyToken = event.replyToken;
                 const postbackData = new URLSearchParams(event.postback.data);
-                const ticketId = postbackData.get('ticket_id') || '';
-                const category = postbackData.get('category') || '';
+                const feedbackText = postbackData.get('feedback_text') || '';
 
                 if (replyToken) {
                     const now = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' });
                     
+                    // ปรับรูปแบบข้อความตอบกลับ: ตัด ID ออก และใส่ข้อความลูกค้าที่ได้รับแทนหมวดหมู่
+                    const updateMessage = `✅ [อัปเดตสถานะ]\nFeedback: "${decodeURIComponent(feedbackText)}"\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`;
+
                     await fetch('https://api.line.me/v2/bot/message/reply', {
                         method: 'POST',
                         headers: {
@@ -418,7 +420,7 @@ app.post('/api/webhook', async (req, res) => {
                             replyToken: replyToken,
                             messages: [{
                                 type: 'text',
-                                text: `✅ [อัปเดตสถานะ]\nFeedback ID: #${ticketId} (${decodeURIComponent(category)})\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`
+                                text: updateMessage
                             }]
                         })
                     });
