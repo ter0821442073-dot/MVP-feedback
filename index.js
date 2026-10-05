@@ -267,7 +267,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
                     },
                     {
                         type: "text",
-                        text: "Cinema • สาขากาฬสินธุ์",
+                        text: "MVP • สาขากาฬสินธุ์",
                         color: "#ffffffcc",
                         size: "xs",
                         margin: "xs"
