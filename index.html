@@ -3,50 +3,55 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Feedback & Sentiment System</title>
+    <title>ส่ง Feedback ให้เรา</title>
     <style>
-        body { font-family: sans-serif; max-width: 650px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
-        .form-group { margin-bottom: 15px; }
-        label { font-weight: bold; display: block; margin-bottom: 5px; }
+        body { font-family: sans-serif; max-width: 650px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #333; }
+        .form-group { margin-bottom: 18px; }
+        label { font-weight: bold; display: block; margin-bottom: 6px; }
+        .sub-label { font-size: 12px; color: #666; font-weight: normal; }
         input[type="text"], input[type="tel"], textarea { 
             width: 100%; padding: 10px; box-sizing: border-box; font-size: 14px; 
-            border: 1px solid #ccc; border-radius: 4px; 
+            border: 1px solid #ccc; border-radius: 6px; outline: none;
+        }
+        input[type="text"]:focus, input[type="tel"]:focus, textarea:focus {
+            border-color: #007bff; box-shadow: 0 0 4px rgba(0,123,255,0.25);
         }
         textarea { height: 120px; resize: vertical; }
-        button { padding: 10px 20px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; width: 100%; }
+        button { padding: 12px 20px; background-color: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; width: 100%; font-weight: bold; transition: background 0.2s; }
         button:hover { background-color: #0056b3; }
-        #result { margin-top: 20px; padding: 15px; border-radius: 6px; background-color: #f8f9fa; border: 1px solid #ddd; display: none; }
-        .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-weight: bold; color: white; }
-        .bg-Negative { background-color: #dc3545; }
-        .bg-Neutral { background-color: #ffc107; color: #333; }
-        .bg-Positive { background-color: #28a745; }
+        button:disabled { background-color: #a0c4ff; cursor: not-allowed; }
+        #result { margin-top: 20px; padding: 15px 20px; border-radius: 6px; background-color: #e9f5ff; border: 1px solid #b8daff; display: none; text-align: center; }
+        .success-title { color: #004085; font-size: 18px; font-weight: bold; margin-bottom: 8px; }
     </style>
 </head>
 <body>
-    <h2>ส่ง Feedback</h2>
+    <h2>ส่ง Feedback ถึงเรา</h2>
 
-    <!-- เพิ่มส่วนกรอกข้อมูลผู้ส่ง -->
     <div class="form-group">
-        <label for="userName">ชื่อของคุณ (ไม่บังคับ):</label>
+        <label for="userName">ชื่อของคุณ <span class="sub-label">(ไม่บังคับ)</span></label>
         <input type="text" id="userName" placeholder="เช่น คุณสมชาย">
     </div>
 
+    <!-- ปรับปรุง Label และ Placeholder ให้เชิญชวนกรอกเบอร์โทร -->
     <div class="form-group">
-        <label for="userPhone">เบอร์โทรศัพท์ (ไม่บังคับ):</label>
-        <input type="tel" id="userPhone" placeholder="เช่น 0812345678">
+        <label for="userPhone">
+            เบอร์โทรศัพท์ 
+            <span class="sub-label">(ระบุเพื่อให้ทีมงานติดต่อกลับเพื่อช่วยเหลือ หรือติดตามผล)</span>
+        </label>
+        <input type="tel" id="userPhone" placeholder="เช่น 0812345678 (เผื่อกรณีต้องการให้เจ้าหน้าที่ติดต่อกลับ)">
     </div>
 
     <div class="form-group">
-        <label for="inputText">ข้อความ Feedback:</label>
-        <textarea id="inputText" placeholder="พิมพ์ข้อความจากลูกค้า เช่น 'ปัญหาที่พบเจอ การบริการ สิ่งที่อยากแนะนำ อื่นๆ'..."></textarea>
+        <label for="inputText">ข้อความ Feedback <span style="color:red">*</span></label>
+        <textarea id="inputText" placeholder="แจ้งปัญหา ข้อเสนอแนะ หรือความประทับใจของคุณได้ที่นี่..."></textarea>
     </div>
 
-    <button onclick="sendFeedback()">ส่งข้อความ</button>
+    <button id="submitBtn" onclick="sendFeedback()">ส่งข้อความ</button>
 
     <div id="result"></div>
 
     <script>
-        // เมื่อเปิดหน้าเว็บ ดึงข้อมูลชื่อและเบอร์เดิมที่เคยกรอกไว้ให้อัตโนมัติ (ถ้ามี)
+        // โหลดข้อมูลเดิมที่เคยกรอกไว้ให้อัตโนมัติ
         window.onload = function() {
             document.getElementById('userName').value = localStorage.getItem('feedback_user_name') || '';
             document.getElementById('userPhone').value = localStorage.getItem('feedback_user_phone') || '';
@@ -57,15 +62,18 @@
             const phone = document.getElementById('userPhone').value.trim();
             const text = document.getElementById('inputText').value.trim();
             const resultDiv = document.getElementById('result');
+            const btn = document.getElementById('submitBtn');
             
-            if (!text) return alert('กรุณากรอกข้อความก่อนครับ');
+            if (!text) return alert('กรุณากรอกข้อความ Feedback ก่อนส่งครับ');
             
-            // บันทึกชื่อและเบอร์ลง LocalStorage เพื่อให้สแกนครั้งต่อไปไม่ต้องกรอกซ้ำ
+            // บันทึกข้อมูลเข้า LocalStorage
             if (name) localStorage.setItem('feedback_user_name', name);
             if (phone) localStorage.setItem('feedback_user_phone', phone);
 
-            resultDiv.style.display = 'block';
-            resultDiv.innerHTML = 'กำลังวิเคราะห์ข้อความจาก AI...';
+            // ปรับ UI ขณะกำลังส่งข้อความ (Loading State)
+            btn.disabled = true;
+            btn.innerText = 'กำลังส่งข้อมูล...';
+            resultDiv.style.display = 'none';
 
             try {
                 const response = await fetch('/api/feedback', {
@@ -77,27 +85,42 @@
                 const data = await response.json();
                 
                 if (data.error) {
-                    resultDiv.innerHTML = `<span style="color:red">${data.error}</span>`;
+                    resultDiv.style.display = 'block';
+                    resultDiv.style.backgroundColor = '#f8d7da';
+                    resultDiv.style.borderColor = '#f5c6cb';
+                    resultDiv.innerHTML = `<span style="color:#721c24">${data.error}</span>`;
                     return;
                 }
 
-                const res = data.analysis;
+                // แสดงข้อความขอบคุณลูกค้า ( Customer-friendly message )
+                resultDiv.style.display = 'block';
+                resultDiv.style.backgroundColor = '#d4edda';
+                resultDiv.style.borderColor = '#c3e6cb';
+                
+                let contactMsg = phone 
+                    ? `หากมีข้อสงสัยเพิ่มเติม เจ้าหน้าที่อาจติดต่อกลับไปยังเบอร์ <strong>${phone}</strong> ครับ`
+                    : 'ขอบคุณสำหรับทุกข้อเสนอแนะเพื่อนำไปปรับปรุงการบริการครับ';
 
                 resultDiv.innerHTML = `
-                    <h3>ผลการวิเคราะห์</h3>
-                    <p><strong>ผู้ส่งข้อมูล:</strong> ${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})</p>
-                    <p><strong>Sentiment:</strong> <span class="badge bg-${res.sentiment}">${res.sentiment}</span></p>
-                    <p><strong>ระดับความด่วน:</strong> ${res.urgency}</p>
-                    <p><strong>หมวดหมู่:</strong> ${res.category}</p>
-                    <p><strong>สรุปปัญหา:</strong> ${res.summary}</p>
-                    <p><strong>คำแนะนำทีมงาน:</strong> ${res.action_recommendation}</p>
+                    <div class="success-title">ส่งข้อมูลเรียบร้อยแล้ว!</div>
+                    <p style="margin: 0; color: #155724;">
+                        ขอบคุณสำหรับ Feedback ของคุณ${name ? ' ' + name : ''} <br>
+                        <small style="color: #155724;">${contactMsg}</small>
+                    </p>
                 `;
 
-                // ล้างช่องข้อความ Feedback ออกหลังส่งสำเร็จ
+                // ล้างช่องข้อความหลังส่งสำเร็จ
                 document.getElementById('inputText').value = '';
 
             } catch (err) {
-                resultDiv.innerHTML = '<span style="color:red">เกิดข้อผิดพลาดในการเชื่อมต่อ</span>';
+                resultDiv.style.display = 'block';
+                resultDiv.style.backgroundColor = '#f8d7da';
+                resultDiv.style.borderColor = '#f5c6cb';
+                resultDiv.innerHTML = '<span style="color:#721c24">เกิดข้อผิดพลาดในการเชื่อมต่อ กรุณาลองใหม่อีกครั้ง</span>';
+            } finally {
+                // คืนค่าปุ่มส่งข้อความ
+                btn.disabled = false;
+                btn.innerText = 'ส่งข้อความ';
             }
         }
     </script>
