@@ -8,7 +8,17 @@ app.use(express.json());
 
 // ตัวแปรสำหรับจำสถานะ Feedback ที่แก้ไขแล้ว (In-Memory State)
 // Note: บน Vercel ค่านี้จะถูก Reset เมื่อเกิด Cold Start หรือ Re-deploy
+// กำหนดขนาดสูงสุดเพื่อป้องกัน Memory Leak
+const MAX_RESOLVED_TICKETS = 1000;
 const resolvedTickets = new Set();
+
+function markTicketResolved(ticketId) {
+    if (resolvedTickets.size >= MAX_RESOLVED_TICKETS) {
+        const firstItem = resolvedTickets.values().next().value;
+        resolvedTickets.delete(firstItem);
+    }
+    resolvedTickets.add(ticketId);
+}
 
 /**
  * 1. ฟังก์ชัน Guardrail ขั้นสูงสุด (Version 6.6 - เพิ่มระบบดักจับน้ำอัดลมจืด/โค้กจืด)
@@ -19,7 +29,7 @@ function applyGuardrail(analysis, text) {
     // รายการคำชมเชยชัดเจน
     const positiveKeywords = ['ดีมาก', 'ดีเยี่ยม', 'ประทับใจ', 'ชมเชย', 'หล่อ', 'สวย', 'สุดยอด', 'น่ารัก', 'ยิ้มแย้ม', 'พูดจาดี', 'สะอาดมาก', 'หอม', 'อร่อย', 'บริการดี'];
     
-    // รายการคำติ / เชิงลบทุกประเภท (เพิ่ม 'จืด', 'เหมือนน้ำเปล่า', 'โค้กจืด')
+    // รายการคำติ / เชิงลบทุกประเภท
     const negativeKeywords = [
         'ไม่ค่อยดี', 'ไม่ดี', 'ไม่โอเค', 'ไม่น่ารัก', 'ไม่ยิ้ม', 'ไม่ประทับใจ', 'ไม่สุภาพ', 'ไม่แนะนำ', 'พนักงานน้อย', 
         'ตะคอก', 'ตะโกน', 'ด่า', 'ขึ้นเสียง', 'หน้าบึ้ง', 'ชักสีหน้า', 'พูดจาแย่', 'พูดจาหยาบคาย', 'พนักงานไม่พอ', 
@@ -55,7 +65,7 @@ function applyGuardrail(analysis, text) {
     }
 
     // กฎที่ 3: อาหารและเครื่องดื่ม (ป๊อปคอร์น, น้ำ, โค้ก, ขนม)
-    if (['ป๊อปคอร์น', 'ป็อบคอร์น', 'น้ำอัดลม', 'น้ำโค้ก', 'โค้ก', 'เป๊ปซี่', 'น้ำ', 'ขนม', 'อาหาร', 'รสหวาน', 'รสเค็ม', 'ชีส'].some(k => textLower.includes(k))) {
+    if (['ป๊อปคอร์น', 'ป็อบคอร์น', 'น้ำอัดลม', 'น้ำโค้ก', 'โค้ก', 'เป๊ปซี่', 'น้ำส้ม', 'น้ำเขียว', 'น้ำแดง', 'น้ำสไปร์ท', 'น้ำ', 'ขนม', 'อาหาร', 'รสหวาน', 'รสเค็ม', 'ชีส'].some(k => textLower.includes(k))) {
         analysis.category = 'อาหารและเครื่องดื่ม';
         
         const isDrinkIssue = ['จืด', 'เหมือนน้ำเปล่า', 'ไม่มีรสชาติ', 'เจือจาง', 'ไม่ซ่า', 'ไม่มีก๊าซ', 'จืดมาก'].some(k => textLower.includes(k));
@@ -292,7 +302,8 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
     const urgencyInfo = getUrgencyBadge(analysis.urgency);
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
     
-    const ticketId = Date.now().toString().slice(-6);
+    // สร้าง Ticket ID แบบสุ่มตัวเลข 6 หลักเพื่อความเฉพาะเจาะจง
+    const ticketId = `${Date.now().toString().slice(-4)}${Math.floor(10 + Math.random() * 90)}`;
 
     const flexPayload = {
         type: "flex",
@@ -305,7 +316,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
                 contents: [
                     {
                         type: "text",
-                        text: `📢 แจ้งเตือน Feedback`,
+                        text: `📢 แจ้งเตือน Feedback (#${ticketId})`,
                         weight: "bold",
                         color: "#ffffff",
                         size: "md"
@@ -385,8 +396,9 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
                         action: {
                             type: "postback",
                             label: "☑ ทำการแก้ไขแล้ว",
-                            data: `action=resolve&ticket_id=${ticketId}&feedback_text=${encodeURIComponent(customerText)}`,
-                            displayText: `รับทราบ/ทำการแก้ไข Feedback เรียบร้อยแล้ว`
+                            // ส่งเฉพาะ action และ ticket_id เพื่อไม่ให้ความยาวของ string เกินโควต้า 300 ตัวอักษรของ LINE
+                            data: `action=resolve&ticket_id=${ticketId}`,
+                            displayText: `รับทราบ/ทำการแก้ไข Feedback (#${ticketId}) เรียบร้อยแล้ว`
                         },
                         style: "primary",
                         color: "#007bff",
@@ -463,19 +475,18 @@ app.post('/api/webhook', async (req, res) => {
                 const replyToken = event.replyToken;
                 const postbackData = new URLSearchParams(event.postback.data);
                 const ticketId = postbackData.get('ticket_id');
-                const feedbackText = postbackData.get('feedback_text') || '';
 
                 if (replyToken && channelToken) {
                     let updateMessage = '';
 
                     if (ticketId && resolvedTickets.has(ticketId)) {
-                        updateMessage = `⚠️ [แจ้งเตือน]\nFeedback นี้ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`;
+                        updateMessage = `⚠️ [แจ้งเตือน]\nFeedback (#${ticketId}) นี้ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`;
                     } else {
                         if (ticketId) {
-                            resolvedTickets.add(ticketId);
+                            markTicketResolved(ticketId);
                         }
                         const now = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' });
-                        updateMessage = `✅ [อัปเดตสถานะ]\nFeedback: "${decodeURIComponent(feedbackText)}"\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`;
+                        updateMessage = `✅ [อัปเดตสถานะ]\nFeedback (#${ticketId || 'N/A'})\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`;
                     }
 
                     await fetch('https://api.line.me/v2/bot/message/reply', {
