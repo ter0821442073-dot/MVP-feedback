@@ -1,52 +1,17 @@
 import express from 'express';
 import dotenv from 'dotenv';
-import crypto from 'crypto';
 
 dotenv.config();
 
 const app = express();
-
-// ใช้ middleware อ่าน raw body เฉพาะ endpoint Webhook เพื่อคำนวณ Signature Validation
-app.use('/api/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
-// In-Memory Cache สำหรับเก็บ Ticket ที่แก้แล้ว และ Event ID ที่เคยประมวลผล (ป้องกัน Webhook Redelivery)
-const MAX_CACHE_SIZE = 1000;
+// ตัวแปรสำหรับจำสถานะ Feedback ที่แก้ไขแล้ว (In-Memory State)
+// Note: บน Vercel ค่านี้จะถูก Reset เมื่อเกิด Cold Start หรือ Re-deploy
 const resolvedTickets = new Set();
-const processedEventIds = new Set();
-
-function addToBoundedSet(setInstance, item) {
-    if (setInstance.size >= MAX_CACHE_SIZE) {
-        const firstItem = setInstance.values().next().value;
-        setInstance.delete(firstItem);
-    }
-    setInstance.add(item);
-}
 
 /**
- * ฟังก์ชันสำหรับตรวจสอบ LINE Webhook Signature (x-line-signature)
- */
-function verifyLineSignature(req) {
-    const channelSecret = process.env.LINE_CHANNEL_SECRET?.trim();
-    if (!channelSecret) {
-        console.warn('⚠️ Missing LINE_CHANNEL_SECRET in environment variables. Bypassing signature check.');
-        return true;
-    }
-
-    const signature = req.headers['x-line-signature'];
-    if (!signature) return false;
-
-    const body = req.body instanceof Buffer ? req.body.toString('utf-8') : JSON.stringify(req.body);
-    const hash = crypto
-        .createHmac('SHA256', channelSecret)
-        .update(body)
-        .digest('base64');
-
-    return hash === signature;
-}
-
-/**
- * 1. ฟังก์ชัน Guardrail ขั้นสูงสุด (ลำดับความสำคัญ: เคสวิกฤต -> เคสทั่วไป)
+ * 1. ฟังก์ชัน Guardrail ขั้นสูงสุด (Version 6.6 - เพิ่มระบบดักจับน้ำอัดลมจืด/โค้กจืด)
  */
 function applyGuardrail(analysis, text) {
     const textLower = (text || '').toLowerCase();
@@ -54,7 +19,7 @@ function applyGuardrail(analysis, text) {
     // รายการคำชมเชยชัดเจน
     const positiveKeywords = ['ดีมาก', 'ดีเยี่ยม', 'ประทับใจ', 'ชมเชย', 'หล่อ', 'สวย', 'สุดยอด', 'น่ารัก', 'ยิ้มแย้ม', 'พูดจาดี', 'สะอาดมาก', 'หอม', 'อร่อย', 'บริการดี'];
     
-    // รายการคำติ / เชิงลบทุกประเภท
+    // รายการคำติ / เชิงลบทุกประเภท (เพิ่ม 'จืด', 'เหมือนน้ำเปล่า', 'โค้กจืด')
     const negativeKeywords = [
         'ไม่ค่อยดี', 'ไม่ดี', 'ไม่โอเค', 'ไม่น่ารัก', 'ไม่ยิ้ม', 'ไม่ประทับใจ', 'ไม่สุภาพ', 'ไม่แนะนำ', 'พนักงานน้อย', 
         'ตะคอก', 'ตะโกน', 'ด่า', 'ขึ้นเสียง', 'หน้าบึ้ง', 'ชักสีหน้า', 'พูดจาแย่', 'พูดจาหยาบคาย', 'พนักงานไม่พอ', 
@@ -67,33 +32,18 @@ function applyGuardrail(analysis, text) {
     const hasPositive = positiveKeywords.some(k => textLower.includes(k));
     const hasNegative = negativeKeywords.some(k => textLower.includes(k));
 
-    // ==========================================
-    // กฎที่ 1 [CRITICAL]: ระบบฉาย หนังสว่าง/จอดำ/ไม่ฉาย/ไม่มีเสียง
-    // ==========================================
-    if (['หนังไม่ฉาย', 'ไม่ฉาย', 'จอดำ', 'ไม่มีเสียง', 'เสียงเบา', 'ภาพเบลอ', 'ลำโพง', 'ซับ', 'ภาพกระตุก'].some(k => textLower.includes(k))) {
-        analysis.category = 'ระบบฉายและเสียง';
-        analysis.sentiment = 'Negative';
-        analysis.urgency = ['จอดำ', 'ไม่ฉาย', 'ดับ'].some(k => textLower.includes(k)) ? 'Critical' : 'High';
-        analysis.action_recommendation = '🚨 แจ้งช่างเทคนิคและผู้จัดการโรงภาพยนตร์เข้าตรวจสอบห้องควบคุมการฉาย (Projection Room) ทันที!';
-        return analysis;
-    }
+    const isStaffIssue = ['พนักงาน', 'บริการ', 'แนะนำ', 'ตะคอก', 'ตะโกน', 'ด่า', 'ขึ้นเสียง', 'หน้าบึ้ง', 'ชักสีหน้า', 'ไม่ยิ้ม', 'พูดจา', 'มารยาท', 'เคาน์เตอร์', 'ลืม'].some(k => textLower.includes(k));
 
-    const isStaffIssue = ['พนักงาน', 'บริการ', 'แนะนำ', 'ตะคอก', 'ตะโกน', 'ด่า', 'ขึ้นเสียง', 'หน้าบึ้ง', 'ชักสีหน้า', 'ไม่ยิ้ม', 'พูดจา', 'มารยาท', 'เคาน์เตอร์'].some(k => textLower.includes(k));
-
-    // ==========================================
-    // กฎที่ 2: พนักงานลืมปฏิบัติหน้าที่ / พนักงานลืมปิดไฟ
-    // ==========================================
-    if (isStaffIssue && (['ลืม', 'ลืมปิด', 'ไม่ปิดไฟ'].some(k => textLower.includes(k)))) {
+    // กฎที่ 1: พนักงานลืมปิดไฟ / ลืมบริการ
+    if (isStaffIssue && (['ลืม', 'ไม่ปิด', 'ลืมปิด', 'สปอตไลท์'].some(k => textLower.includes(k)))) {
         analysis.sentiment = 'Negative';
         analysis.urgency = 'High';
-        analysis.category = 'พนักงานและการบริการ';
+        analysis.category = 'อาหารและเครื่องดื่ม';
         analysis.action_recommendation = 'แจ้งผู้จัดการสาขาเน้นย้ำและกำชับพนักงานตรวจสอบการปิดไฟ/สปอตไลท์ในโรงภาพยนตร์ก่อนเริ่มฉายทุกครั้ง';
         return analysis;
     }
 
-    // ==========================================
-    // กฎที่ 3: พนักงานทำบริการไม่ดี
-    // ==========================================
+    // กฎที่ 2: พนักงานทำบริการไม่ดี
     if (isStaffIssue && (hasNegative || textLower.includes('ไม่'))) {
         if (!hasPositive || textLower.includes('ไม่ค่อยดี') || textLower.includes('ไม่ดี') || textLower.includes('ไม่ค่อย')) {
             analysis.sentiment = 'Negative';
@@ -104,20 +54,17 @@ function applyGuardrail(analysis, text) {
         }
     }
 
-    // ==========================================
-    // กฎที่ 4: อาหารและเครื่องดื่ม
-    // ==========================================
+    // กฎที่ 3: อาหารและเครื่องดื่ม (ป๊อปคอร์น, น้ำ, โค้ก, ขนม)
     if (['ป๊อปคอร์น', 'ป็อบคอร์น', 'น้ำอัดลม', 'น้ำโค้ก', 'โค้ก', 'เป๊ปซี่', 'น้ำส้ม', 'น้ำเขียว', 'น้ำแดง', 'น้ำสไปร์ท', 'น้ำ', 'ขนม', 'อาหาร', 'รสหวาน', 'รสเค็ม', 'ชีส'].some(k => textLower.includes(k))) {
         analysis.category = 'อาหารและเครื่องดื่ม';
         
-        const isDrink = ['น้ำอัดลม', 'น้ำโค้ก', 'โค้ก', 'เป๊ปซี่', 'น้ำส้ม', 'น้ำเขียว', 'น้ำแดง', 'น้ำสไปร์ท', 'น้ำ'].some(k => textLower.includes(k));
-        const isDrinkIssue = ['จืด', 'เหมือนน้ำเปล่า', 'ไม่มีรสชาติ', 'เจือจาง', 'ไม่ซ่า', 'ไม่มีก๊าซ', 'จืดมาก', 'ไม่อร่อย'].some(k => textLower.includes(k));
+        const isDrinkIssue = ['จืด', 'เหมือนน้ำเปล่า', 'ไม่มีรสชาติ', 'เจือจาง', 'ไม่ซ่า', 'ไม่มีก๊าซ', 'จืดมาก'].some(k => textLower.includes(k));
         
         if (hasNegative || isDrinkIssue || ['ไม่กรอบ', 'เหนียว', 'เค็ม', 'ไม่อร่อย', 'ไม่ซ่า', 'เหม็น', 'ช้า', 'เย็น', 'ชืด'].some(k => textLower.includes(k))) {
             analysis.sentiment = 'Negative';
             analysis.urgency = 'High';
             
-            if (isDrink) {
+            if (isDrinkIssue) {
                 analysis.action_recommendation = 'แจ้งทีมเคาน์เตอร์ตรวจสอบตู้กดน้ำ/หัวน้ำหวาน/ก๊าซ CO2 ทันที และเปลี่ยนแก้วใหม่ให้ลูกค้าด่วน';
             } else {
                 analysis.action_recommendation = 'แจ้งทีมเคาน์เตอร์อาหารตรวจสอบคุณภาพสินค้า เตาอบป๊อปคอร์น และเปลี่ยนชุดใหม่ให้ลูกค้าทันที';
@@ -131,16 +78,14 @@ function applyGuardrail(analysis, text) {
         }
     }
 
-    // ==========================================
-    // กฎที่ 5: ความสะอาด สถานที่ กลิ่นอับ และระบบแสงสว่าง
-    // ==========================================
-    if (['เหม็น', 'เหม็นอับ', 'อับ', 'สกปรก', 'ขยะ', 'ห้องน้ำ', 'ไฟ', 'มืด', 'สว่าง', 'ไม่มีไฟ', 'สปอตไลท์'].some(k => textLower.includes(k))) {
+    // กฎที่ 4: ความสะอาด สถานที่ กลิ่นอับ และแสงสว่าง
+    if (['เหม็น', 'เหม็นอับ', 'อับ', 'สกปรก', 'ขยะ', 'ห้องน้ำ', 'ไฟ', 'มืด', 'สว่าง', 'ไม่มีไฟ'].some(k => textLower.includes(k)) && !textLower.includes('จอดำ') && !textLower.includes('หนัง')) {
         analysis.category = 'ความสะอาดและสถานที่';
         if (hasNegative || ['เหม็น', 'เหม็นอับ', 'อับ', 'มืด', 'ไม่มีไฟ', 'สกปรก'].some(k => textLower.includes(k))) {
             analysis.sentiment = 'Negative';
             analysis.urgency = 'High';
             
-            if (['เหม็น', 'เหม็นอับ', 'อับ', 'สกปรก', 'ขยะ', 'ห้องน้ำ'].some(k => textLower.includes(k))) {
+            if (['เหม็น', 'เหม็นอับ', 'อับ', 'สกปรก', 'ขยะ'].some(k => textLower.includes(k))) {
                 analysis.action_recommendation = 'แจ้งแม่บ้านและทีมทำความสะอาดเข้าตรวจสอบ อบสเปรย์ปรับอากาศ และทำความสะอาดพื้นที่ทันที';
             } else {
                 analysis.action_recommendation = 'แจ้งทีมช่างอาคาร/เจ้าหน้าที่สถานที่เข้าตรวจสอบและแก้ไขระบบแสงสว่างในโรงภาพยนตร์ด่วน';
@@ -149,9 +94,7 @@ function applyGuardrail(analysis, text) {
         }
     }
 
-    // ==========================================
-    // กฎที่ 6: เรื่องคูปอง / ตั๋ว / โปรโมชัน / แอป
-    // ==========================================
+    // กฎที่ 5: เรื่องคูปอง / ตั๋ว / โปรโมชัน / แอป
     if (['คูปอง', 'สิทธิ์', 'วอชเชอร์', 'voucher', 'ตั๋ว', 'แอป', 'ตู้สแกน', 'สแกน', 'โปรโมชัน'].some(k => textLower.includes(k))) {
         analysis.category = 'ระบบตั๋วและแอปพลิเคชัน';
         if (hasNegative || textLower.includes('ใช้ไม่ได้') || textLower.includes('ไม่') || textLower.includes('ทำไม')) {
@@ -162,9 +105,16 @@ function applyGuardrail(analysis, text) {
         }
     }
 
-    // ==========================================
+    // กฎที่ 6: หนังไม่ฉาย / จอดำ / ไม่มีเสียง
+    if (['หนังไม่ฉาย', 'ไม่ฉาย', 'จอดำ', 'ไม่มีเสียง', 'เสียงเบา', 'ภาพเบลอ', 'ลำโพง', 'ซับ'].some(k => textLower.includes(k))) {
+        analysis.category = 'ระบบฉายและเสียง';
+        analysis.sentiment = 'Negative';
+        analysis.urgency = ['จอดำ', 'ไม่ฉาย'].some(k => textLower.includes(k)) ? 'Critical' : 'High';
+        analysis.action_recommendation = '🚨 แจ้งช่างเทคนิคและผู้จัดการโรงภาพยนตร์เข้าตรวจสอบห้องควบคุมการฉาย (Projection Room) ทันที!';
+        return analysis;
+    }
+
     // กฎที่ 7: แอร์หนาว / ร้อน
-    // ==========================================
     if (['แอร์', 'หนาว', 'ร้อน', 'อบอ้าว'].some(k => textLower.includes(k)) && !textLower.includes('เสียง')) {
         analysis.category = 'ระบบปรับอากาศ (แอร์)';
         if (hasNegative || ['หนาว', 'ร้อน', 'อบอ้าว'].some(k => textLower.includes(k))) {
@@ -175,9 +125,7 @@ function applyGuardrail(analysis, text) {
         return analysis;
     }
 
-    // ==========================================
-    // กฎที่ 8: คำชมเชยทั่วไป
-    // ==========================================
+    // กฎที่ 8: คำชมชัดเจน
     if (hasPositive && !hasNegative) {
         analysis.sentiment = 'Positive';
         analysis.urgency = 'Low';
@@ -217,19 +165,13 @@ function getDefaultAnalysis(text) {
     let category = 'ทั่วไป / คำชม';
     let action = 'ขอบคุณสำหรับข้อเสนอแนะ และจะนำไปพัฒนาปรับปรุงการให้บริการต่อไป';
 
-    if (['หนัง', 'เสียง', 'ภาพ', 'จอ', 'ซับ', 'ลำโพง', 'ฉาย', 'จอดำ'].some(k => textLower.includes(k))) {
-        category = 'ระบบฉายและเสียง';
-        action = '🚨 แจ้งช่างเทคนิคเข้าตรวจสอบห้องควบคุมการฉายด่วน';
-    } else if (['พนักงาน', 'บริการ', 'แนะนำ', 'ตะคอก', 'ด่า', 'ขึ้นเสียง', 'ลืม'].some(k => textLower.includes(k))) {
+    if (['พนักงาน', 'บริการ', 'แนะนำ', 'ตะคอก', 'ด่า', 'ขึ้นเสียง', 'ลืม'].some(k => textLower.includes(k))) {
         category = 'พนักงานและการบริการ';
         action = 'ประสานงานผู้จัดการสาขาตรวจสอบและปรับปรุงการบริการของพนักงาน';
     } else if (['ป๊อปคอร์น', 'ป็อบคอร์น', 'น้ำอัดลม', 'น้ำโค้ก', 'โค้ก', 'น้ำ', 'ขนม', 'อาหาร'].some(k => textLower.includes(k))) {
         category = 'อาหารและเครื่องดื่ม';
-        const isDrink = ['น้ำอัดลม', 'น้ำโค้ก', 'โค้ก', 'เป๊ปซี่', 'น้ำส้ม', 'น้ำเขียว', 'น้ำแดง', 'น้ำสไปร์ท', 'น้ำ'].some(k => textLower.includes(k));
-        if (isNegative || ['จืด', 'เหมือนน้ำเปล่า', 'ไม่อร่อย'].some(k => textLower.includes(k))) {
-            action = isDrink 
-                ? 'แจ้งทีมเคาน์เตอร์ตรวจสอบตู้กดน้ำ/หัวน้ำหวาน/ก๊าซ CO2 ทันที และเปลี่ยนแก้วใหม่ให้ลูกค้าด่วน' 
-                : 'แจ้งทีมเคาน์เตอร์อาหารตรวจสอบคุณภาพสินค้า เตาอบป๊อปคอร์น และเปลี่ยนชุดใหม่ให้ลูกค้าทันที';
+        if (isNegative || ['จืด', 'เหมือนน้ำเปล่า'].some(k => textLower.includes(k))) {
+            action = 'แจ้งทีมเคาน์เตอร์อาหารตรวจสอบหัวน้ำหวาน/ตู้กดน้ำ และเปลี่ยนแก้วใหม่ให้ลูกค้าด่วน';
         } else {
             action = 'ชื่นชมทีมเคาน์เตอร์อาหารและรักษาคุณภาพสินค้าต่อไป';
         }
@@ -242,6 +184,9 @@ function getDefaultAnalysis(text) {
     } else if (['แอร์', 'หนาว', 'ร้อน', 'อบอ้าว'].some(k => textLower.includes(k))) {
         category = 'ระบบปรับอากาศ (แอร์)';
         action = 'ประสานงานช่างอาคารตรวจสอบและปรับอุณหภูมิแอร์ด่วน';
+    } else if (['หนัง', 'เสียง', 'ภาพ', 'จอ', 'ซับ', 'ลำโพง', 'ฉาย'].some(k => textLower.includes(k))) {
+        category = 'ระบบฉายและเสียง';
+        action = 'แจ้งช่างเทคนิคเข้าตรวจสอบห้องควบคุมการฉายด่วน';
     }
 
     let result = {
@@ -268,11 +213,11 @@ async function analyzeFeedbackWithAI(customerText) {
 วิเคราะห์ข้อความนี้: "${customerText}"
 
 [กฎความรู้สึก (Sentiment & Urgency Rules)]:
-1. คำว่า "เหม็นอับ", "ไม่มีไฟ", "ไฟไม่มีเลย", "ลืมปิดไฟ", "ไม่ปิดไฟ", "ใช้ไม่ได้", "พนักงาน...", "ไม่กรอบ", "เหนียว", "จืด", "เหมือนน้ำเปล่า", "โค้กจืด", "ไม่อร่อย", "จอดำ", "ไม่ฉาย" ถือเป็นข้อผิดพลาด/คำร้องเรียน บังคับ sentiment: "Negative" และ urgency: "High" หรือ "Critical" เสมอ!
+1. คำว่า "เหม็นอับ", "ไม่มีไฟ", "ไฟไม่มีเลย", "ลืมปิดไฟ", "ไม่ปิดไฟ", "ใช้ไม่ได้", "พนักงาน...", "ไม่กรอบ", "เหนียว", "จืด", "เหมือนน้ำเปล่า", "โค้กจืด" ถือเป็นข้อผิดพลาด/คำร้องเรียน บังคับ sentiment: "Negative" และ urgency: "High" เสมอ!
 2. ห้ามตอบ "Neutral" หรือ urgency "Low" สำหรับข้อความที่เป็นการร้องเรียน ปัญหา หรือความบกพร่องเด็ดขาด!
 
 [การจำแนกหมวดหมู่ (category)]:
-- "อาหารและเครื่องดื่ม": เรื่องป๊อปคอร์น, น้ำ, โค้ก, น้ำอัดลม, ขนม, จืด, เหมือนน้ำเปล่า, ไม่กรอบ, อร่อย, เหนียว, รสชาติ, ไม่อร่อย
+- "อาหารและเครื่องดื่ม": เรื่องป๊อปคอร์น, น้ำ, โค้ก, น้ำอัดลม, ขนม, จืด, เหมือนน้ำเปล่า, ไม่กรอบ, อร่อย, เหนียว, รสชาติ
 - "ความสะอาดและสถานที่": เรื่องกลิ่นเหม็น, เหม็นอับ, ไฟแสงสว่างในโรง, ไม่มีไฟ, ไฟมืด, ห้องน้ำ, ความสะอาด, เบาะ/เก้าอี้
 - "พนักงานและการบริการ": เรื่องพนักงาน, พนักงานลืม..., การบริการ, การแนะนำ, คำชมพนักงาน, ตะคอก, ขึ้นเสียง
 - "ระบบฉายและเสียง": เรื่องหนังไม่ฉาย, จอดำ, ภาพเบลอ, เสียงเบา/ดัง, ลำโพง, ซับไตเติล
@@ -347,7 +292,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
     const urgencyInfo = getUrgencyBadge(analysis.urgency);
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
     
-    const ticketId = `${Date.now().toString().slice(-4)}${Math.floor(10 + Math.random() * 90)}`;
+    const ticketId = Date.now().toString().slice(-6);
 
     const flexPayload = {
         type: "flex",
@@ -360,7 +305,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
                 contents: [
                     {
                         type: "text",
-                        text: `📢 แจ้งเตือน Feedback (#${ticketId})`,
+                        text: `📢 แจ้งเตือน Feedback`,
                         weight: "bold",
                         color: "#ffffff",
                         size: "md"
@@ -440,8 +385,8 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
                         action: {
                             type: "postback",
                             label: "☑ ทำการแก้ไขแล้ว",
-                            data: `action=resolve&ticket_id=${ticketId}`,
-                            displayText: `รับทราบ/ทำการแก้ไข Feedback (#${ticketId}) เรียบร้อยแล้ว`
+                            data: `action=resolve&ticket_id=${ticketId}&feedback_text=${encodeURIComponent(customerText)}`,
+                            displayText: `รับทราบ/ทำการแก้ไข Feedback เรียบร้อยแล้ว`
                         },
                         style: "primary",
                         color: "#007bff",
@@ -507,47 +452,30 @@ app.post('/api/feedback', async (req, res) => {
     }
 });
 
-// Endpoint สำหรับ Webhook LINE (พร้อม Signature Validation และ Redelivery Guard)
+// Endpoint สำหรับ Webhook LINE
 app.post('/api/webhook', async (req, res) => {
     try {
-        // 1. ตรวจสอบ Signature Validation
-        if (!verifyLineSignature(req)) {
-            console.error('❌ Invalid LINE Webhook Signature');
-            return res.status(401).send('Unauthorized: Invalid Signature');
-        }
-
         const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN?.trim();
-        const body = req.body instanceof Buffer ? JSON.parse(req.body.toString('utf-8')) : req.body;
-        const events = body.events || [];
+        const events = req.body.events || [];
 
         for (const event of events) {
-            // 2. ตรวจสอบ LINE Webhook Redelivery (Deduplication)
-            const webhookEventId = event.webhookEventId;
-            if (webhookEventId) {
-                if (processedEventIds.has(webhookEventId)) {
-                    console.log(`⚠️ Skip duplicate webhook event: ${webhookEventId}`);
-                    continue;
-                }
-                addToBoundedSet(processedEventIds, webhookEventId);
-            }
-
-            // จัดการ Event: postback
             if (event.type === 'postback') {
                 const replyToken = event.replyToken;
                 const postbackData = new URLSearchParams(event.postback.data);
                 const ticketId = postbackData.get('ticket_id');
+                const feedbackText = postbackData.get('feedback_text') || '';
 
                 if (replyToken && channelToken) {
                     let updateMessage = '';
 
                     if (ticketId && resolvedTickets.has(ticketId)) {
-                        updateMessage = `⚠️ [แจ้งเตือน]\nFeedback (#${ticketId}) นี้ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`;
+                        updateMessage = `⚠️ [แจ้งเตือน]\nFeedback นี้ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`;
                     } else {
                         if (ticketId) {
-                            addToBoundedSet(resolvedTickets, ticketId);
+                            resolvedTickets.add(ticketId);
                         }
                         const now = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' });
-                        updateMessage = `✅ [อัปเดตสถานะ]\nFeedback (#${ticketId || 'N/A'})\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`;
+                        updateMessage = `✅ [อัปเดตสถานะ]\nFeedback: "${decodeURIComponent(feedbackText)}"\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`;
                     }
 
                     await fetch('https://api.line.me/v2/bot/message/reply', {
@@ -567,7 +495,6 @@ app.post('/api/webhook', async (req, res) => {
                 }
             }
 
-            // จัดการ Event: message
             if (event.type === 'message' && event.message.type === 'text') {
                 const groupId = event.source.groupId;
                 const replyToken = event.replyToken;
