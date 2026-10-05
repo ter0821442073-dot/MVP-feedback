@@ -1,27 +1,70 @@
 import express from 'express';
 import dotenv from 'dotenv';
+import crypto from 'crypto';
 
 dotenv.config();
 
 const app = express();
-app.use(express.json());
 
-// ตัวแปรสำหรับจำสถานะ Feedback ที่แก้ไขแล้ว (In-Memory State)
-// Note: บน Vercel ค่านี้จะถูก Reset เมื่อเกิด Cold Start หรือ Re-deploy
+// หมายเหตุ: LINE Webhook จำเป็นต้องใช้ raw body ในการตรวจสอบ HMAC Signature
+// Express json middleware ปรับใช้แบบ verify เพื่อดึง rawBody เก็บไว้
+app.use(express.json({
+    verify: (req, res, buf) => {
+        req.rawBody = buf;
+    }
+}));
+
+// In-Memory State สำหรับจดจำสถานะ Ticket
+// (คำแนะนำ: สำหรับ Production ระยะยาว ควรเชื่อมต่อกับ Redis เช่น Upstash Redis)
 const resolvedTickets = new Set();
 
+// ล้าง Ticket ที่เก่าเกินไปทุกๆ 1 ชั่วโมงเพื่อป้องกัน Memory Leak
+setInterval(() => {
+    if (resolvedTickets.size > 5000) {
+        resolvedTickets.clear();
+    }
+}, 3600000);
+
 /**
- * 1. ฟังก์ชัน Guardrail ขั้นสูงสุด (Version 6.7 - ปรับปรุงระบบดักจับปัญหาการฉาย: ฉายเรท/เลท/สะดุด)
+ * Middleware ตรวจสอบ Signature จาก LINE เพื่อความปลอดภัย
+ */
+function verifyLineSignature(req, res, next) {
+    const channelSecret = process.env.LINE_CHANNEL_SECRET?.trim();
+    const signature = req.headers['x-line-signature'];
+
+    // หากไม่ได้ตั้งค่า CHANNEL_SECRET ใน env ให้ข้ามการตรวจ (หรือแจ้งเตือน)
+    if (!channelSecret) {
+        console.warn('⚠️ Warning: LINE_CHANNEL_SECRET is not set. Skipping signature verification.');
+        return next();
+    }
+
+    if (!signature || !req.rawBody) {
+        return res.status(401).send('Unauthorized: Missing signature or body');
+    }
+
+    const hash = crypto
+        .createHmac('SHA256', channelSecret)
+        .update(req.rawBody)
+        .digest('base64');
+
+    if (hash !== signature) {
+        console.error('❌ Invalid LINE Webhook Signature');
+        return res.status(403).send('Forbidden: Invalid signature');
+    }
+
+    next();
+}
+
+/**
+ * 1. ฟังก์ชัน Guardrail ขั้นสูงสุด (Version 6.8)
  */
 function applyGuardrail(analysis, text) {
     const textLower = (text || '').toLowerCase();
 
-    // รายการคำชมเชยชัดเจน
     const positiveKeywords = ['ดีมาก', 'ดีเยี่ยม', 'ประทับใจ', 'ชมเชย', 'หล่อ', 'สวย', 'สุดยอด', 'น่ารัก', 'ยิ้มแย้ม', 'พูดจาดี', 'สะอาดมาก', 'หอม', 'อร่อย', 'บริการดี'];
     
-    // รายการคำติ / เชิงลบทุกประเภท (เพิ่ม 'ฉายเรท', 'ฉายเลท', 'สะดุด', 'เรท', 'เลท')
     const negativeKeywords = [
-        'ไม่ค่อยดี', 'ไม่ดี', 'ไม่โอเค', 'ไม่น่ารัก', 'ไม่ยิ้ม', 'ไม่ประทับใจ', 'ไม่สุภาพ', 'ไม่แนะนำ', 'พนักงานน้อย', 
+        'ไม่ค่อยดี', 'ไม่ดี', 'ไม่โอเค', 'ไม่น่ารัก', 'ไม่ยิ้ม', 'ไม่ประทับใจ', 'ไม่สุภาพ', 'พนักงานน้อย', 
         'ตะคอก', 'ตะโกน', 'ด่า', 'ขึ้นเสียง', 'หน้าบึ้ง', 'ชักสีหน้า', 'พูดจาแย่', 'พูดจาหยาบคาย', 'พนักงานไม่พอ', 
         'มารยาทแย่', 'มารยาทไม่ดี', 'บริการแย่', 'บริการห่วย', 'ช้า', 'คิดเงินผิด', 'แถวยาว', 'ลืม', 'ลืมปิด',
         'แย่', 'ห่วย', 'พัง', 'เสีย', 'เหม็น', 'เหม็นอับ', 'อับ', 'สกปรก', 'หนาว', 'ร้อน', 'อบอ้าว', 'ไม่ปิดไฟ', 'ไม่มีไฟ', 'คูปองใช้ไม่ได้', 'ใช้ไม่ได้', 'ใช้ไม่ได้เลย', 'ทำไมใช้ไม่ได้',
@@ -55,7 +98,7 @@ function applyGuardrail(analysis, text) {
         }
     }
 
-    // กฎที่ 3: อาหารและเครื่องดื่ม (ป๊อปคอร์น, น้ำ, โค้ก, ขนม)
+    // กฎที่ 3: อาหารและเครื่องดื่ม
     if (['ป๊อปคอร์น', 'ป็อบคอร์น', 'น้ำอัดลม', 'น้ำโค้ก', 'โค้ก', 'เป๊ปซี่', 'น้ำส้ม', 'น้ำเขียว', 'น้ำแดง', 'น้ำสไปร์ท', 'น้ำ', 'ขนม', 'อาหาร', 'รสหวาน', 'รสเค็ม', 'ชีส'].some(k => textLower.includes(k))) {
         analysis.category = 'อาหารและเครื่องดื่ม';
         
@@ -106,7 +149,7 @@ function applyGuardrail(analysis, text) {
         }
     }
 
-    // กฎที่ 6: ระบบฉายและเสียง (ปรับปรุงดักจับ: หนังไม่ฉาย / จอดำ / ไม่มีเสียง / ฉายเรท / ฉายเลท / สะดุด)
+    // กฎที่ 6: ระบบฉายและเสียง
     if (['หนังไม่ฉาย', 'ไม่ฉาย', 'จอดำ', 'ไม่มีเสียง', 'เสียงเบา', 'ภาพเบลอ', 'ลำโพง', 'ซับ', 'ฉายเรท', 'ฉายเลท', 'สะดุด', 'กระตุก', 'เรท', 'เลท'].some(k => textLower.includes(k))) {
         analysis.category = 'ระบบฉายและเสียง';
         analysis.sentiment = 'Negative';
@@ -202,7 +245,7 @@ function getDefaultAnalysis(text) {
 }
 
 /**
- * 3. ฟังก์ชันเรียก AI วิเคราะห์ความคิดเห็น (พร้อม Timeout 3.5 วินาที)
+ * 3. ฟังก์ชันเรียก AI วิเคราะห์ความคิดเห็น (พร้อม Timeout และ Safe Cleanup)
  */
 async function analyzeFeedbackWithAI(customerText) {
     const apiKey = process.env.GEMINI_API_KEY;
@@ -235,11 +278,11 @@ async function analyzeFeedbackWithAI(customerText) {
   "action_recommendation": "คำแนะนำทีมงานแบบเจาะจงการแก้ไขปัญหา"
 }`;
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3500);
+
     try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
-
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 3500);
 
         const response = await fetch(url, {
             method: 'POST',
@@ -247,8 +290,6 @@ async function analyzeFeedbackWithAI(customerText) {
             body: JSON.stringify({ contents: [{ parts: [{ text: promptText }] }] }),
             signal: controller.signal
         });
-
-        clearTimeout(timeoutId);
 
         if (!response.ok) return getDefaultAnalysis(customerText);
 
@@ -265,6 +306,8 @@ async function analyzeFeedbackWithAI(customerText) {
     } catch (err) {
         console.warn('⚠️ Gemini Timeout/Error -> Switched to Fallback Rule');
         return getDefaultAnalysis(customerText);
+    } finally {
+        clearTimeout(timeoutId); // ป้องกัน memory leaks จาก timer ค้าง
     }
 }
 
@@ -293,7 +336,8 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
     const urgencyInfo = getUrgencyBadge(analysis.urgency);
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
     
-    const ticketId = Date.now().toString().slice(-6);
+    // สุ่มผสมเพื่อสร้าง Ticket ID ที่มีโอกาสซ้ำได้ยากขึ้น
+    const ticketId = `${Date.now().toString().slice(-6)}${Math.floor(Math.random() * 10)}`;
 
     const flexPayload = {
         type: "flex",
@@ -428,8 +472,8 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
 app.post('/api/feedback', async (req, res) => {
     try {
         const { text, name, phone } = req.body;
-        if (!text || !text.trim()) {
-            return res.status(400).json({ error: 'กรุณากรอกข้อความ Feedback' });
+        if (!text || typeof text !== 'string' || !text.trim()) {
+            return res.status(400).json({ error: 'กรุณากรอกข้อความ Feedback ให้ถูกต้อง' });
         }
 
         const now = new Date();
@@ -449,12 +493,12 @@ app.post('/api/feedback', async (req, res) => {
         });
     } catch (error) {
         console.error('❌ Error inside /api/feedback:', error.message);
-        return res.status(500).json({ error: `เกิดข้อผิดพลาด: ${error.message}` });
+        return res.status(500).json({ error: 'เกิดข้อผิดพลาดภายในระบบ' });
     }
 });
 
-// Endpoint สำหรับ Webhook LINE
-app.post('/api/webhook', async (req, res) => {
+// Endpoint สำหรับ Webhook LINE (ใส่ Middleware Verify Signature เพิ่มความปลอดภัย)
+app.post('/api/webhook', verifyLineSignature, async (req, res) => {
     try {
         const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN?.trim();
         const events = req.body.events || [];
@@ -462,21 +506,35 @@ app.post('/api/webhook', async (req, res) => {
         for (const event of events) {
             if (event.type === 'postback') {
                 const replyToken = event.replyToken;
-                const postbackData = new URLSearchParams(event.postback.data);
-                const ticketId = postbackData.get('ticket_id');
-                const feedbackText = postbackData.get('feedback_text') || '';
+                
+                let ticketId = null;
+                let feedbackText = '';
+
+                try {
+                    const postbackData = new URLSearchParams(event.postback.data);
+                    ticketId = postbackData.get('ticket_id');
+                    feedbackText = postbackData.get('feedback_text') || '';
+                } catch (e) {
+                    console.error('❌ Error parsing postback data:', e.message);
+                }
 
                 if (replyToken && channelToken) {
                     let updateMessage = '';
 
                     if (ticketId && resolvedTickets.has(ticketId)) {
-                        updateMessage = `⚠️️ [แจ้งเตือน]\nFeedback นี้ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`;
+                        updateMessage = `⚠ [แจ้งเตือน]\nFeedback นี้ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`;
                     } else {
                         if (ticketId) {
                             resolvedTickets.add(ticketId);
                         }
                         const now = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' });
-                        updateMessage = `✅ [อัปเดตสถานะ]\nFeedback: "${decodeURIComponent(feedbackText)}"\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`;
+                        
+                        let decodedText = feedbackText;
+                        try {
+                            decodedText = decodeURIComponent(feedbackText);
+                        } catch (e) { /* ignore decode error */ }
+
+                        updateMessage = `✅ [อัปเดตสถานะ]\nFeedback: "${decodedText}"\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`;
                     }
 
                     await fetch('https://api.line.me/v2/bot/message/reply', {
@@ -499,7 +557,9 @@ app.post('/api/webhook', async (req, res) => {
             if (event.type === 'message' && event.message.type === 'text') {
                 const groupId = event.source.groupId;
                 const replyToken = event.replyToken;
-                if (groupId && replyToken && event.message.text.toLowerCase().includes('id') && channelToken) {
+                
+                // ตรวจสอบความต้องการแสดง Group ID
+                if (groupId && replyToken && event.message.text.toLowerCase().trim() === 'id' && channelToken) {
                     await fetch('https://api.line.me/v2/bot/message/reply', {
                         method: 'POST',
                         headers: {
