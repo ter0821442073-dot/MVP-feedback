@@ -264,7 +264,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
                         text: `📢 แจ้งเตือน Feedback`,
                         weight: "bold",
                         color: "#ffffff",
-                        size: "sm"
+                        size: "md"
                     },
                     {
                         type: "text",
@@ -304,7 +304,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, analy
                         layout: "vertical",
                         contents: [
                             { type: "text", text: "💬 ข้อความที่ได้รับ:", size: "xs", color: "#8c8c8c" },
-                            { type: "text", text: `"${customerText}"`, size: "sm", color: "#111111", weight: "bold", wrap: true, margin: "xs" }
+                            { type: "text", text: `"${customerText}"`, size: "lg", color: "#111111", weight: "bold", wrap: true, margin: "xs" }
                         ],
                         margin: "md",
                         backgroundColor: "#f8f9fa",
