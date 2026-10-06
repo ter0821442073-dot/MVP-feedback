@@ -1,147 +1,343 @@
-<!DOCTYPE html>
-<html lang="th">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MVPKalasin Feedback</title>
-    <style>
-        body { font-family: sans-serif; max-width: 650px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #333; }
-        .form-group { margin-bottom: 18px; }
-        label { font-weight: bold; display: block; margin-bottom: 6px; }
-        .sub-label { font-size: 12px; color: #666; font-weight: normal; }
-        input[type="text"], input[type="tel"], textarea { 
-            width: 100%; padding: 10px; box-sizing: border-box; font-size: 14px; 
-            border: 1px solid #ccc; border-radius: 6px; outline: none;
-        }
-        input[type="text"]:focus, input[type="tel"]:focus, textarea:focus {
-            border-color: #007bff; box-shadow: 0 0 4px rgba(0,123,255,0.25);
-        }
-        textarea { height: 120px; resize: vertical; }
-        button { padding: 12px 20px; background-color: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; width: 100%; font-weight: bold; transition: background 0.2s; }
-        button:hover { background-color: #0056b3; }
-        button:disabled { background-color: #a0c4ff; cursor: not-allowed; }
-        #result { margin-top: 20px; padding: 15px 20px; border-radius: 6px; display: none; text-align: center; }
-        .result-title { font-size: 18px; font-weight: bold; margin-bottom: 8px; }
-    </style>
-</head>
-<body>
-    <h2>ส่ง Feedback ถึงเรา</h2>
+import express from 'express';
+import dotenv from 'dotenv';
+import crypto from 'crypto';
 
-    <div class="form-group">
-        <label for="userName">ชื่อของคุณ <span class="sub-label">(ไม่บังคับ)</span></label>
-        <input type="text" id="userName" placeholder="เช่น คุณสมชาย">
-    </div>
+dotenv.config();
 
-    <div class="form-group">
-        <label for="userPhone">
-            เบอร์โทรศัพท์ 
-            <span class="sub-label">(ระบุเพื่อให้ทีมงานติดต่อกลับเพื่อช่วยเหลือ หรือติดตามผล)</span>
-        </label>
-        <input type="tel" id="userPhone" placeholder="เช่น 0812345678 (เผื่อกรณีต้องการให้เจ้าหน้าที่ติดต่อกลับ)">
-    </div>
+const app = express();
 
-    <div class="form-group">
-        <label for="inputText">ข้อความ Feedback <span style="color:red">*</span></label>
-        <textarea id="inputText" maxlength="100" placeholder="แจ้งปัญหา ข้อเสนอแนะ หรือความประทับใจของคุณได้ที่นี่..."></textarea>
-        <small style="font-size: 12px; color: #666; display: block; margin-top: 4px;">⚠️ กรอกข้อความได้ไม่เกิน 300 ตัวอักษร</small>
-    </div>
+// --- 🔒 Security Headers ---
+app.use((req, res, next) => {
+    res.setHeader('X-XSS-Protection', '1; mode=block');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+});
 
-    <button id="submitBtn" onclick="sendFeedback()">ส่งข้อความ</button>
+app.use(express.json({
+    verify: (req, res, buf) => {
+        req.rawBody = buf;
+    }
+}));
 
-    <div id="result"></div>
+// ตัวแปรนับลำดับ Ticket ID เริ่มต้นที่ 1 และเพิ่มขึ้นทีละ 1 (1, 2, 3, 4...)
+let ticketCounter = 1;
 
-    <script>
-        // โหลดข้อมูลเดิมที่เคยกรอกไว้ให้อัตโนมัติ
-        window.onload = function() {
-            document.getElementById('userName').value = localStorage.getItem('feedback_user_name') || '';
-            document.getElementById('userPhone').value = localStorage.getItem('feedback_user_phone') || '';
-        };
+// In-Memory State สำหรับจดจำสถานะ Ticket
+const resolvedTickets = new Set();
 
-        async function sendFeedback() {
-            const name = document.getElementById('userName').value.trim();
-            const phone = document.getElementById('userPhone').value.trim();
-            const text = document.getElementById('inputText').value.trim();
-            const resultDiv = document.getElementById('result');
-            const btn = document.getElementById('submitBtn');
-            
-            if (!text) return alert('กรุณากรอกข้อความ Feedback ก่อนส่งครับ');
-            
-            // บันทึกข้อมูลเข้า LocalStorage
-            if (name) localStorage.setItem('feedback_user_name', name);
-            if (phone) localStorage.setItem('feedback_user_phone', phone);
+setInterval(() => {
+    if (resolvedTickets.size > 5000) {
+        resolvedTickets.clear();
+    }
+}, 3600000);
 
-            // ปรับ UI ขณะกำลังส่งข้อความ (Loading State)
-            btn.disabled = true;
-            btn.innerText = 'กำลังส่งข้อมูล...';
-            resultDiv.style.display = 'none';
+/**
+ * ฟังก์ชันกรองข้อความ (Sanitize) ป้องกัน XSS สคริปต์
+ */
+function sanitizeInput(input) {
+    if (typeof input !== 'string') return '';
+    return input
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#x27;')
+        .replace(/\//g, '&#x2F;')
+        .trim();
+}
 
-            try {
-                const response = await fetch('/api/feedback', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text, name, phone })
-                });
-                
-                const data = await response.json();
-                
-                // กรณีเกิดข้อผิดพลาดจาก Backend หรือส่ง LINE ไม่สำเร็จ
-                if (data.error || data.line_sent === false) {
-                    resultDiv.style.display = 'block';
-                    resultDiv.style.backgroundColor = '#f8d7da';
-                    resultDiv.style.borderColor = '#f5c6cb';
-                    resultDiv.style.border = '1px solid #f5c6cb';
-                    
-                    const errorText = data.error || 'เกิดข้อผิดพลาดในการส่งข้อมูลไปยังระบบ กรุณาลองใหม่อีกครั้ง';
-                    
-                    resultDiv.innerHTML = `
-                        <div class="result-title" style="color: #721c24;">เกิดข้อผิดพลาด!</div>
-                        <p style="margin: 0; color: #721c24;">
-                            ${errorText}
-                        </p>
-                    `;
-                    return;
-                }
+/**
+ * Middleware ตรวจสอบ Signature จาก LINE
+ */
+function verifyLineSignature(req, res, next) {
+    const channelSecret = process.env.LINE_CHANNEL_SECRET?.trim();
+    const signature = req.headers['x-line-signature'];
 
-                // กรณีส่งสำเร็จเรียบร้อย (กล่องสีเขียว)
-                resultDiv.style.display = 'block';
-                resultDiv.style.backgroundColor = '#d4edda';
-                resultDiv.style.borderColor = '#c3e6cb';
-                resultDiv.style.border = '1px solid #c3e6cb';
-                
-                let contactMsg = phone 
-                    ? `หากมีข้อสงสัยเพิ่มเติม เจ้าหน้าที่อาจติดต่อกลับไปยังเบอร์ <strong>${phone}</strong> ครับ`
-                    : 'ขอบคุณสำหรับทุกข้อเสนอแนะเพื่อนำไปปรับปรุงการบริการครับ';
+    if (!channelSecret) {
+        console.warn('⚠️ Warning: LINE_CHANNEL_SECRET is not set. Skipping signature verification.');
+        return next();
+    }
 
-                resultDiv.innerHTML = `
-                    <div class="result-title" style="color: #004085;">ส่งข้อมูลเรียบร้อยแล้ว!</div>
-                    <p style="margin: 0; color: #155724;">
-                        ขอบคุณสำหรับ Feedback ของคุณ${name ? ' ' + name : ''} <br>
-                        <small style="color: #155724;">${contactMsg}</small>
-                    </p>
-                `;
+    if (!signature || !req.rawBody) {
+        return res.status(401).send('Unauthorized: Missing signature or body');
+    }
 
-                // ล้างช่องข้อความหลังส่งสำเร็จ
-                document.getElementById('inputText').value = '';
+    const hash = crypto
+        .createHmac('SHA256', channelSecret)
+        .update(req.rawBody)
+        .digest('base64');
 
-            } catch (err) {
-                // กรณี Network Error / Catch Error (กล่องสีแดง)
-                resultDiv.style.display = 'block';
-                resultDiv.style.backgroundColor = '#f8d7da';
-                resultDiv.style.borderColor = '#f5c6cb';
-                resultDiv.style.border = '1px solid #f5c6cb';
-                
-                resultDiv.innerHTML = `
-                    <div class="result-title" style="color: #721c24;">เกิดข้อผิดพลาด!</div>
-                    <p style="margin: 0; color: #721c24;">
-                        ไม่สามารถเชื่อมต่อระบบได้ กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองใหม่อีกครั้ง
-                    </p>
-                `;
-            } finally {
-                // คืนค่าปุ่มส่งข้อความ
-                btn.disabled = false;
-                btn.innerText = 'ส่งข้อความ';
+    if (hash !== signature) {
+        console.error('❌ Invalid LINE Webhook Signature');
+        return res.status(403).send('Forbidden: Invalid signature');
+    }
+
+    next();
+}
+
+/**
+ * ฟังก์ชันส่ง LINE Push Alert ด้วย Flex Message
+ */
+async function sendLinePushAlert(customerText, name, phone, formattedDate) {
+    const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN?.trim();
+    const targetId = process.env.LINE_TARGET_ID?.trim();
+
+    if (!channelToken || !targetId) {
+        console.error('❌ Missing LINE API Token or Target ID in environment variables');
+        return false;
+    }
+
+    const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
+    
+    // 💡 รัน Ticket ID เริ่มต้นที่ 1 และบวกเพิ่มทีละ 1 (1, 2, 3, 4...)
+    const ticketId = ticketCounter++;
+
+    // ล้างค่าขึ้นบรรทัดใหม่ (\n, \r)
+    const cleanText = customerText.replace(/[\r\n]+/g, ' ').trim();
+
+    // ตัดความยาวข้อความสำหรับ Flex Text Body ไม่เกิน 150 ตัวอักษร
+    const flexDisplayText = cleanText.length > 150 
+        ? cleanText.substring(0, 150) + '...' 
+        : cleanText;
+
+    // ตัดความยาวสำหรับ altText ให้สั้นและปลอดภัยที่สุด
+    const shortAltText = cleanText.length > 25 
+        ? cleanText.substring(0, 25) + '...' 
+        : cleanText;
+
+    const flexPayload = {
+        type: "flex",
+        altText: `📬 Feedback (#${ticketId}): ${shortAltText}`,
+        contents: {
+            type: "bubble",
+            header: {
+                type: "box",
+                layout: "horizontal",
+                contents: [
+                    {
+                        type: "box",
+                        layout: "vertical",
+                        contents: [
+                            {
+                                type: "text",
+                                text: "📢 แจ้งเตือน Feedback",
+                                weight: "bold",
+                                color: "#ffffff",
+                                size: "sm"
+                            },
+                            {
+                                type: "text",
+                                text: "Cinema • สาขากาฬสินธุ์",
+                                color: "#ffffffcc",
+                                size: "xs",
+                                margin: "xs"
+                            }
+                        ],
+                        flex: 3
+                    },
+                    {
+                        type: "text",
+                        text: `#${ticketId}`,
+                        color: "#ffffff",
+                        size: "xs",
+                        weight: "bold",
+                        align: "end",
+                        gravity: "top",
+                        flex: 2
+                    }
+                ],
+                backgroundColor: "#03C755",
+                paddingAll: "md"
+            },
+            body: {
+                type: "box",
+                layout: "vertical",
+                contents: [
+                    {
+                        type: "box",
+                        layout: "horizontal",
+                        contents: [
+                            { type: "text", text: "👤 ผู้ส่ง:", size: "xs", color: "#8c8c8c", flex: 2 },
+                            { type: "text", text: customerInfo, size: "xs", color: "#111111", weight: "bold", flex: 5, wrap: true }
+                        ]
+                    },
+                    {
+                        type: "box",
+                        layout: "horizontal",
+                        contents: [
+                            { type: "text", text: "📅 เวลา:", size: "xs", color: "#8c8c8c", flex: 2 },
+                            { type: "text", text: formattedDate, size: "xs", color: "#111111", flex: 5 }
+                        ],
+                        margin: "xs"
+                    },
+                    { type: "separator", margin: "md" },
+                    {
+                        type: "box",
+                        layout: "vertical",
+                        contents: [
+                            { type: "text", text: "💬 ข้อความที่ได้รับ:", size: "xs", color: "#8c8c8c" },
+                            { type: "text", text: `"${flexDisplayText}"`, size: "sm", color: "#111111", weight: "bold", wrap: true, margin: "xs" }
+                        ],
+                        margin: "md",
+                        backgroundColor: "#f8f9fa",
+                        paddingAll: "md",
+                        cornerRadius: "md"
+                    }
+                ]
+            },
+            footer: {
+                type: "box",
+                layout: "vertical",
+                contents: [
+                    {
+                        type: "button",
+                        action: {
+                            type: "postback",
+                            label: "☑ ทำการแก้ไขแล้ว",
+                            data: `action=resolve&ticket_id=${ticketId}`,
+                            displayText: `รับทราบ/ทำการแก้ไข Feedback (#${ticketId}) เรียบร้อยแล้ว`
+                        },
+                        style: "primary",
+                        color: "#007bff",
+                        height: "sm"
+                    }
+                ]
             }
         }
-    </script>
-</body>
-</html>
+    };
+
+    try {
+        const response = await fetch('https://api.line.me/v2/bot/message/push', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${channelToken}`
+            },
+            body: JSON.stringify({
+                to: targetId,
+                messages: [flexPayload]
+            })
+        });
+
+        if (!response.ok) {
+            const errBody = await response.text();
+            console.error('❌ LINE API Rejected Push Details:', errBody);
+            return false;
+        }
+
+        return true;
+    } catch (err) {
+        console.error('❌ Network Error while sending LINE Push Alert:', err.message);
+        return false;
+    }
+}
+
+// Endpoint รับข้อมูล Feedback
+app.post('/api/feedback', async (req, res) => {
+    try {
+        const { text, name, phone } = req.body;
+        
+        if (!text || typeof text !== 'string' || !text.trim()) {
+            return res.status(400).json({ error: 'กรุณากรอกข้อความ Feedback ให้ถูกต้อง' });
+        }
+
+        const sanitizedText = sanitizeInput(text);
+        const sanitizedName = sanitizeInput(name);
+        const sanitizedPhone = sanitizeInput(phone);
+
+        const now = new Date();
+        const formattedDate = now.toLocaleString('th-TH', {
+            timeZone: 'Asia/Bangkok',
+            year: 'numeric', month: 'short', day: 'numeric',
+            hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+        }) + ' น.';
+
+        const lineSuccess = await sendLinePushAlert(sanitizedText, sanitizedName, sanitizedPhone, formattedDate);
+
+        return res.json({ 
+            success: true, 
+            line_sent: lineSuccess 
+        });
+    } catch (error) {
+        console.error('❌ Error inside /api/feedback:', error.message);
+        return res.status(500).json({ error: 'เกิดข้อผิดพลาดภายในระบบ' });
+    }
+});
+
+// Endpoint สำหรับ Webhook LINE
+app.post('/api/webhook', verifyLineSignature, async (req, res) => {
+    try {
+        const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN?.trim();
+        const events = req.body.events || [];
+
+        for (const event of events) {
+            if (event.type === 'postback') {
+                const replyToken = event.replyToken;
+                let ticketId = null;
+
+                try {
+                    const postbackData = new URLSearchParams(event.postback.data);
+                    ticketId = postbackData.get('ticket_id');
+                } catch (e) {
+                    console.error('❌ Error parsing postback data:', e.message);
+                }
+
+                if (replyToken && channelToken) {
+                    let updateMessage = '';
+
+                    if (ticketId && resolvedTickets.has(ticketId)) {
+                        updateMessage = `⚠ [แจ้งเตือน]\nFeedback Ticket #${ticketId} นี้ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`;
+                    } else {
+                        if (ticketId) {
+                            resolvedTickets.add(ticketId);
+                        }
+                        const now = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' });
+                        updateMessage = `✅ [อัปเดตสถานะ]\nFeedback Ticket #${ticketId || 'N/A'}\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`;
+                    }
+
+                    await fetch('https://api.line.me/v2/bot/message/reply', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${channelToken}`
+                        },
+                        body: JSON.stringify({
+                            replyToken: replyToken,
+                            messages: [{
+                                type: 'text',
+                                text: updateMessage
+                            }]
+                        })
+                    });
+                }
+            }
+
+            if (event.type === 'message' && event.message.type === 'text') {
+                const groupId = event.source.groupId;
+                const replyToken = event.replyToken;
+                
+                if (groupId && replyToken && event.message.text.toLowerCase().trim() === 'id' && channelToken) {
+                    await fetch('https://api.line.me/v2/bot/message/reply', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${channelToken}`
+                        },
+                        body: JSON.stringify({
+                            replyToken: replyToken,
+                            messages: [{ type: 'text', text: `📌 Group ID ของกลุ่มนี้คือ:\n${groupId}` }]
+                        })
+                    });
+                }
+            }
+        }
+        return res.status(200).send('OK');
+    } catch (err) {
+        console.error('❌ Webhook Error:', err.message);
+        return res.status(200).send('OK');
+    }
+});
+
+export default app;
