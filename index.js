@@ -209,7 +209,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, timeO
                             type: "postback",
                             label: "☑ ทำการแก้ไขแล้ว",
                             data: `action=resolve&ticket_id=${ticketId}`,
-                            displayText: `ทำการแก้ไข Feedback เมื่อเวลา ${timeOnly} น. เรียบร้อยแล้ว`
+                            displayText: `ทำการแก้ไข Feedback #${ticketSeqNumber} เรียบร้อยแล้ว`
                         },
                         style: "primary",
                         color: "#007bff",
