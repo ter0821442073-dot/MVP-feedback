@@ -36,46 +36,49 @@ function getBangkokYear() {
 }
 
 // -------------------------------------------------------------
-// 📁 ระบบบันทึกเลขลำดับลงไฟล์ JSON (Persistent Counter)
+// 📁 ระบบบันทึกเลขลำดับลงไฟล์ JSON (Persistent Counter - Improved)
 // -------------------------------------------------------------
 const COUNTER_FILE_PATH = path.join(process.cwd(), 'ticket_counter.json');
 
-/**
- * ฟังก์ชันอ่านข้อมูลตัวนับล่าสุดจากไฟล์
- */
-function loadCounterData() {
-    try {
-        if (fs.existsSync(COUNTER_FILE_PATH)) {
-            const data = fs.readFileSync(COUNTER_FILE_PATH, 'utf8');
-            return JSON.parse(data);
-        }
-    } catch (err) {
-        console.error('⚠️ ไม่สามารถอ่านไฟล์ counter ได้:', err.message);
+// โหลดค่าเริ่มต้นเข้า Memory ตั้งแต่เริ่มเปิด Server
+let counterState = { year: getBangkokYear(), count: 0 };
+
+try {
+    if (fs.existsSync(COUNTER_FILE_PATH)) {
+        const fileData = fs.readFileSync(COUNTER_FILE_PATH, 'utf8');
+        counterState = JSON.parse(fileData);
+        console.log(`📌 โหลดค่าลำดับล่าสุดสำเร็จ: #${counterState.count} (ปี ${counterState.year})`);
+    } else {
+        // สร้างไฟล์เริ่มต้นถ้ายังไม่มี
+        fs.writeFileSync(COUNTER_FILE_PATH, JSON.stringify(counterState, null, 2), 'utf8');
     }
-    return { year: getBangkokYear(), count: 0 };
+} catch (err) {
+    console.error('⚠️ ไม่สามารถอ่าน/สร้างไฟล์ counter ได้:', err.message);
 }
 
 /**
- * ฟังก์ชันดึงเลขลำดับประจำปี (รีเซ็ตเป็น 1 เมื่อเริ่มปีใหม่)
+ * ฟังก์ชันดึงเลขลำดับประจำปี (อัปเดตทั้ง Memory และไฟล์ JSON)
  */
 function getNextTicketNumber() {
-    const nowYear = getBangkokYear();
-    let counterData = loadCounterData();
+    const currentYear = getBangkokYear();
 
-    if (counterData.year !== nowYear) {
-        counterData.year = nowYear;
-        counterData.count = 0; // รีเซ็ตเมื่อเริ่มปีใหม่
+    // เช็กเปลี่ยนปีใหม่
+    if (counterState.year !== currentYear) {
+        counterState.year = currentYear;
+        counterState.count = 0; // รีเซ็ตเมื่อเริ่มปีใหม่
     }
 
-    counterData.count += 1; // เพิ่มทีละ 1
+    // บวกเพิ่ม 1
+    counterState.count += 1;
 
+    // บันทึกลงไฟล์แบบ Sync ทันที
     try {
-        fs.writeFileSync(COUNTER_FILE_PATH, JSON.stringify(counterData, null, 2), 'utf8');
+        fs.writeFileSync(COUNTER_FILE_PATH, JSON.stringify(counterState, null, 2), 'utf8');
     } catch (err) {
         console.error('❌ ไม่สามารถบันทึกไฟล์ counter ได้:', err.message);
     }
 
-    return counterData.count;
+    return counterState.count;
 }
 // -------------------------------------------------------------
 
@@ -235,7 +238,6 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate) {
                             type: "postback",
                             label: "☑ ทำการแก้ไขแล้ว",
                             data: `action=resolve&ticket_id=${ticketId}`,
-                            // ✏️ ปรับปรุง: เปลี่ยนข้อความตอบกลับเป็นเลขบิล #ticketSeqNumber
                             displayText: `ทำการแก้ไข Feedback #${ticketSeqNumber} เรียบร้อยแล้ว`
                         },
                         style: "primary",
@@ -327,7 +329,7 @@ app.post('/api/webhook', verifyLineSignature, async (req, res) => {
                 if (ticketId) {
                     // 🔒 ตรวจสอบว่า Ticket นี้ถูกบันทึกไปแล้วหรือยัง (ป้องกันการล็อกประมวลผลซ้ำ)
                     if (resolvedTickets.has(ticketId)) {
-                        console.log(`⚠️️ Ticket ID: ${ticketId} ถูกแก้ไขไปแล้ว (ข้ามการประมวลผล)`);
+                        console.log(`⚠ Ticket ID: ${ticketId} ถูกแก้ไขไปแล้ว (ข้ามการประมวลผล)`);
                         continue;
                     }
 
