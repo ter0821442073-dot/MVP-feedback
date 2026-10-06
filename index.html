@@ -6,7 +6,7 @@ dotenv.config();
 
 const app = express();
 
-// --- 🔒 Security Headers ---
+// --- 🔒 เพิ่ม Security Headers เพื่อป้องกัน XSS และ Vulnerabilities ---
 app.use((req, res, next) => {
     res.setHeader('X-XSS-Protection', '1; mode=block');
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -15,18 +15,17 @@ app.use((req, res, next) => {
     next();
 });
 
+// หมายเหตุ: LINE Webhook จำเป็นต้องใช้ raw body ในการตรวจสอบ HMAC Signature
 app.use(express.json({
     verify: (req, res, buf) => {
         req.rawBody = buf;
     }
 }));
 
-// ตัวแปรนับลำดับ Ticket ID เริ่มต้นที่ 1 และเพิ่มขึ้นทีละ 1 (1, 2, 3, 4...)
-let ticketCounter = 1;
-
 // In-Memory State สำหรับจดจำสถานะ Ticket
 const resolvedTickets = new Set();
 
+// ล้าง Ticket ที่เก่าเกินไปทุกๆ 1 ชั่วโมงเพื่อป้องกัน Memory Leak
 setInterval(() => {
     if (resolvedTickets.size > 5000) {
         resolvedTickets.clear();
@@ -34,7 +33,7 @@ setInterval(() => {
 }, 3600000);
 
 /**
- * ฟังก์ชันกรองข้อความ (Sanitize) ป้องกัน XSS สคริปต์
+ * ฟังก์ชันกรองข้อความ (Sanitize) ป้องกัน XSS สคริปต์แบบพื้นฐาน
  */
 function sanitizeInput(input) {
     if (typeof input !== 'string') return '';
@@ -49,7 +48,7 @@ function sanitizeInput(input) {
 }
 
 /**
- * Middleware ตรวจสอบ Signature จาก LINE
+ * Middleware ตรวจสอบ Signature จาก LINE เพื่อความปลอดภัย
  */
 function verifyLineSignature(req, res, next) {
     const channelSecret = process.env.LINE_CHANNEL_SECRET?.trim();
@@ -78,7 +77,7 @@ function verifyLineSignature(req, res, next) {
 }
 
 /**
- * ฟังก์ชันส่ง LINE Push Alert ด้วย Flex Message
+ * ฟังก์ชันส่ง LINE Push Alert ด้วย Flex Message (ตัดการแสดงผล AI ออกแล้ว)
  */
 async function sendLinePushAlert(customerText, name, phone, formattedDate) {
     const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN?.trim();
@@ -91,61 +90,37 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate) {
 
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
     
-    // 💡 รัน Ticket ID เริ่มต้นที่ 1 และบวกเพิ่มทีละ 1 (1, 2, 3, 4...)
-    const ticketId = ticketCounter++;
+    // สุ่มสร้าง Ticket ID
+    const ticketId = `${Date.now().toString().slice(-6)}${Math.floor(Math.random() * 10)}`;
 
-    // ล้างค่าขึ้นบรรทัดใหม่ (\n, \r)
-    const cleanText = customerText.replace(/[\r\n]+/g, ' ').trim();
+    // ตัดความยาวข้อความสำหรับ altText (LINE จำกัดที่ 400 ตัวอักษร)
+    const shortAltText = customerText.length > 50 ? customerText.substring(0, 50) + '...' : customerText;
 
-    // ตัดความยาวข้อความสำหรับ Flex Text Body ไม่เกิน 150 ตัวอักษร
-    const flexDisplayText = cleanText.length > 150 
-        ? cleanText.substring(0, 150) + '...' 
-        : cleanText;
-
-    // ตัดความยาวสำหรับ altText ให้สั้นและปลอดภัยที่สุด
-    const shortAltText = cleanText.length > 25 
-        ? cleanText.substring(0, 25) + '...' 
-        : cleanText;
+    // ตัดความยาวข้อความสำหรับ Postback Data (LINE จำกัด postback data ที่ 300 ตัวอักษร)
+    const shortFeedbackForData = customerText.length > 80 ? customerText.substring(0, 80) + '...' : customerText;
 
     const flexPayload = {
         type: "flex",
-        altText: `📬 Feedback (#${ticketId}): ${shortAltText}`,
+        altText: `📬 Feedback ใหม่: ${shortAltText}`,
         contents: {
             type: "bubble",
             header: {
                 type: "box",
-                layout: "horizontal",
+                layout: "vertical",
                 contents: [
                     {
-                        type: "box",
-                        layout: "vertical",
-                        contents: [
-                            {
-                                type: "text",
-                                text: "📢 แจ้งเตือน Feedback",
-                                weight: "bold",
-                                color: "#ffffff",
-                                size: "sm"
-                            },
-                            {
-                                type: "text",
-                                text: "Cinema • สาขากาฬสินธุ์",
-                                color: "#ffffffcc",
-                                size: "xs",
-                                margin: "xs"
-                            }
-                        ],
-                        flex: 3
+                        type: "text",
+                        text: `📢 แจ้งเตือน Feedback`,
+                        weight: "bold",
+                        color: "#ffffff",
+                        size: "md"
                     },
                     {
                         type: "text",
-                        text: `#${ticketId}`,
-                        color: "#ffffff",
+                        text: "Cinema • สาขากาฬสินธุ์",
+                        color: "#ffffffcc",
                         size: "xs",
-                        weight: "bold",
-                        align: "end",
-                        gravity: "top",
-                        flex: 2
+                        margin: "xs"
                     }
                 ],
                 backgroundColor: "#03C755",
@@ -178,7 +153,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate) {
                         layout: "vertical",
                         contents: [
                             { type: "text", text: "💬 ข้อความที่ได้รับ:", size: "xs", color: "#8c8c8c" },
-                            { type: "text", text: `"${flexDisplayText}"`, size: "sm", color: "#111111", weight: "bold", wrap: true, margin: "xs" }
+                            { type: "text", text: `"${customerText}"`, size: "lg", color: "#111111", weight: "bold", wrap: true, margin: "xs" }
                         ],
                         margin: "md",
                         backgroundColor: "#f8f9fa",
@@ -196,8 +171,8 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate) {
                         action: {
                             type: "postback",
                             label: "☑ ทำการแก้ไขแล้ว",
-                            data: `action=resolve&ticket_id=${ticketId}`,
-                            displayText: `รับทราบ/ทำการแก้ไข Feedback (#${ticketId}) เรียบร้อยแล้ว`
+                            data: `action=resolve&ticket_id=${ticketId}&feedback_text=${encodeURIComponent(shortFeedbackForData)}`,
+                            displayText: `รับทราบ/ทำการแก้ไข Feedback เรียบร้อยแล้ว`
                         },
                         style: "primary",
                         color: "#007bff",
@@ -223,7 +198,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate) {
 
         if (!response.ok) {
             const errBody = await response.text();
-            console.error('❌ LINE API Rejected Push Details:', errBody);
+            console.error('❌ LINE API Rejected Push:', errBody);
             return false;
         }
 
@@ -243,6 +218,7 @@ app.post('/api/feedback', async (req, res) => {
             return res.status(400).json({ error: 'กรุณากรอกข้อความ Feedback ให้ถูกต้อง' });
         }
 
+        // 🔒 ทำการ Sanitize ข้อมูลเพื่อป้องกัน XSS
         const sanitizedText = sanitizeInput(text);
         const sanitizedName = sanitizeInput(name);
         const sanitizedPhone = sanitizeInput(phone);
@@ -275,11 +251,14 @@ app.post('/api/webhook', verifyLineSignature, async (req, res) => {
         for (const event of events) {
             if (event.type === 'postback') {
                 const replyToken = event.replyToken;
+                
                 let ticketId = null;
+                let feedbackText = '';
 
                 try {
                     const postbackData = new URLSearchParams(event.postback.data);
                     ticketId = postbackData.get('ticket_id');
+                    feedbackText = postbackData.get('feedback_text') || '';
                 } catch (e) {
                     console.error('❌ Error parsing postback data:', e.message);
                 }
@@ -288,13 +267,19 @@ app.post('/api/webhook', verifyLineSignature, async (req, res) => {
                     let updateMessage = '';
 
                     if (ticketId && resolvedTickets.has(ticketId)) {
-                        updateMessage = `⚠ [แจ้งเตือน]\nFeedback Ticket #${ticketId} นี้ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`;
+                        updateMessage = `⚠ [แจ้งเตือน]\nFeedback นี้ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`;
                     } else {
                         if (ticketId) {
                             resolvedTickets.add(ticketId);
                         }
                         const now = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' });
-                        updateMessage = `✅ [อัปเดตสถานะ]\nFeedback Ticket #${ticketId || 'N/A'}\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`;
+                        
+                        let decodedText = feedbackText;
+                        try {
+                            decodedText = decodeURIComponent(feedbackText);
+                        } catch (e) { /* ignore decode error */ }
+
+                        updateMessage = `✅ [อัปเดตสถานะ]\nFeedback: "${decodedText}"\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`;
                     }
 
                     await fetch('https://api.line.me/v2/bot/message/reply', {
