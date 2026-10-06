@@ -271,4 +271,68 @@ app.post('/api/feedback', async (req, res) => {
         });
     } catch (error) {
         console.error('❌ Error inside /api/feedback:', error.message);
-        return res.status(
+        return res.status(500).json({ error: 'เกิดข้อผิดพลาดภายในระบบ' });
+    }
+});
+
+// Endpoint สำหรับ Webhook LINE
+app.post('/api/webhook', verifyLineSignature, async (req, res) => {
+    try {
+        const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN?.trim();
+        const events = req.body.events || [];
+
+        for (const event of events) {
+            // เมื่อมีการกดปุ่ม Postback
+            if (event.type === 'postback') {
+                let ticketId = null;
+
+                try {
+                    const postbackData = new URLSearchParams(event.postback.data);
+                    ticketId = postbackData.get('ticket_id');
+                } catch (e) {
+                    console.error('❌ Error parsing postback data:', e.message);
+                }
+
+                if (ticketId) {
+                    // 🔒 ตรวจสอบว่า Ticket นี้ถูกบันทึกไปแล้วหรือยัง (ป้องกันการล็อกประมวลผลซ้ำ)
+                    if (resolvedTickets.has(ticketId)) {
+                        console.log(`⚠️ Ticket ID: ${ticketId} ถูกแก้ไขไปแล้ว (ข้ามการประมวลผล)`);
+                        continue;
+                    }
+
+                    if (resolvedTickets.size > 3000) resolvedTickets.clear();
+                    resolvedTickets.add(ticketId);
+
+                    console.log(`✅ บันทึกการแก้ไข Ticket ID: ${ticketId} สำเร็จ`);
+                }
+                // 💡 ไม่ส่ง Reply Message ตอบกลับ เพื่อไม่ให้มีข้อความจาก Bot เด้งซ้ำ
+            }
+
+            // คำสั่งพิมพ์ 'id' เพื่อเช็ก Group ID
+            if (event.type === 'message' && event.message.type === 'text') {
+                const groupId = event.source.groupId;
+                const replyToken = event.replyToken;
+                
+                if (groupId && replyToken && event.message.text.toLowerCase().trim() === 'id' && channelToken) {
+                    await fetch('https://api.line.me/v2/bot/message/reply', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${channelToken}`
+                        },
+                        body: JSON.stringify({
+                            replyToken: replyToken,
+                            messages: [{ type: 'text', text: `📌 Group ID ของกลุ่มนี้คือ:\n${groupId}` }]
+                        })
+                    });
+                }
+            }
+        }
+        return res.status(200).send('OK');
+    } catch (err) {
+        console.error('❌ Webhook Error:', err.message);
+        return res.status(200).send('OK');
+    }
+});
+
+export default app;
