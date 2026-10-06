@@ -224,44 +224,39 @@ app.post('/api/feedback', async (req, res) => {
     }
 });
 
-// Endpoint สำหรับ Webhook LINE
-app.post('/api/webhook', verifyLineSignature, async (req, res) => {
+// Endpoint สำหรับ Webhook LINE (รับทั้ง ข้อความ และ ปุ่มกด Postback)
+app.post('/api/webhook', async (req, res) => {
     try {
-        const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN?.trim();
         const events = req.body.events || [];
-
         for (const event of events) {
+            
+            // 1. กรณีแอดมินกดปุ่ม "☑️ ทำการแก้ไขแล้ว" (Postback Event)
             if (event.type === 'postback') {
                 const replyToken = event.replyToken;
-                
-                let ticketId = null;
+                const postbackData = new URLSearchParams(event.postback.data);
+                const ticketId = postbackData.get('ticket_id');
+                const feedbackText = postbackData.get('feedback_text') || '';
 
-                try {
-                    const postbackData = new URLSearchParams(event.postback.data);
-                    ticketId = postbackData.get('ticket_id');
-                } catch (e) {
-                    console.error('❌ Error parsing postback data:', e.message);
-                }
-
-                if (replyToken && channelToken) {
+                if (replyToken) {
                     let updateMessage = '';
 
+                    // เช็กว่าเคสนี้ถูกกดแก้ไขไปแล้วหรือยัง
                     if (ticketId && resolvedTickets.has(ticketId)) {
-                        updateMessage = `⚠ [แจ้งเตือน]\nFeedback นี้ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`;
+                        updateMessage = `⚠️ [แจ้งเตือน]\nFeedback นี้ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`;
                     } else {
+                        // บันทึกว่า ticketId นี้จบเคสแล้ว
                         if (ticketId) {
                             resolvedTickets.add(ticketId);
                         }
                         const now = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' });
-                        
-                        updateMessage = `✅ [อัปเดตสถานะ]\nTicket ID: #${ticketId}\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`;
+                        updateMessage = `✅ [อัปเดตสถานะ]\nFeedback: "${decodeURIComponent(feedbackText)}"\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`;
                     }
 
                     await fetch('https://api.line.me/v2/bot/message/reply', {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${channelToken}`
+                            'Authorization': `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`
                         },
                         body: JSON.stringify({
                             replyToken: replyToken,
@@ -274,16 +269,16 @@ app.post('/api/webhook', verifyLineSignature, async (req, res) => {
                 }
             }
 
+            // 2. กรณีพิมพ์ดึง Group ID
             if (event.type === 'message' && event.message.type === 'text') {
                 const groupId = event.source.groupId;
                 const replyToken = event.replyToken;
-                
-                if (groupId && replyToken && event.message.text.toLowerCase().trim() === 'id' && channelToken) {
+                if (groupId && replyToken && event.message.text.includes('id')) {
                     await fetch('https://api.line.me/v2/bot/message/reply', {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${channelToken}`
+                            'Authorization': `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`
                         },
                         body: JSON.stringify({
                             replyToken: replyToken,
@@ -295,7 +290,6 @@ app.post('/api/webhook', verifyLineSignature, async (req, res) => {
         }
         return res.status(200).send('OK');
     } catch (err) {
-        console.error('❌ Webhook Error:', err.message);
         return res.status(200).send('OK');
     }
 });
