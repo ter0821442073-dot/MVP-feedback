@@ -22,7 +22,7 @@ app.use(express.json({
     }
 }));
 
-// In-Memory State สำหรับจดจำสถานะ Ticket ที่ถูกกดแก้ไขไปแล้ว
+// In-Memory State สำหรับจดจำสถานะ Ticket ที่ถูกกดแก้ไขไปแล้ว (กันประมวลผลซ้ำ)
 const resolvedTickets = new Set();
 
 /**
@@ -72,7 +72,7 @@ function verifyLineSignature(req, res, next) {
 /**
  * ฟังก์ชันส่ง LINE Push Alert ด้วย Flex Message
  */
-async function sendLinePushAlert(customerText, name, phone, formattedDate) {
+async function sendLinePushAlert(customerText, name, phone, formattedDate, timeOnly) {
     const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN?.trim();
     const targetId = process.env.LINE_TARGET_ID?.trim();
 
@@ -159,11 +159,11 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate) {
                     {
                         type: "button",
                         action: {
-                            // 💡 เปลี่ยนกลับมาใช้ postback + displayText เพื่อให้ข้อความพิมพ์ออกมาจากฝั่งคนกด (ฝั่งขวา)
                             type: "postback",
                             label: "☑ ทำการแก้ไขแล้ว",
                             data: `action=resolve&ticket_id=${ticketId}`,
-                            displayText: "รับทราบ/ทำการแก้ไข Feedback เรียบร้อยแล้ว"
+                            // 💡 แนบเวลาลงใน displayText โดยตรง เพื่อให้พิมพ์ออกมาจากฝั่งผู้ใช้ (บอลลูนสีเขียวทางขวา)
+                            displayText: `รับทราบ/ทำการแก้ไข Feedback เรียบร้อยแล้ว เมื่อเวลา ${timeOnly} น.`
                         },
                         style: "primary",
                         color: "#007bff",
@@ -221,7 +221,12 @@ app.post('/api/feedback', async (req, res) => {
             hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
         }) + ' น.';
 
-        const lineSuccess = await sendLinePushAlert(sanitizedText, sanitizedName, sanitizedPhone, formattedDate);
+        const timeOnly = now.toLocaleString('th-TH', {
+            timeZone: 'Asia/Bangkok',
+            hour: '2-digit', minute: '2-digit', hour12: false
+        });
+
+        const lineSuccess = await sendLinePushAlert(sanitizedText, sanitizedName, sanitizedPhone, formattedDate, timeOnly);
 
         return res.json({ 
             success: true, 
@@ -240,7 +245,7 @@ app.post('/api/webhook', verifyLineSignature, async (req, res) => {
         const events = req.body.events || [];
 
         for (const event of events) {
-            // เมื่อมีการกดปุ่ม Flex Message
+            // เมื่อมีการกดปุ่ม postback จาก Flex Message
             if (event.type === 'postback') {
                 let ticketId = null;
 
@@ -252,18 +257,17 @@ app.post('/api/webhook', verifyLineSignature, async (req, res) => {
                 }
 
                 if (ticketId) {
-                    // ตรวจสอบสถานะว่า Ticket นี้ถูกบันทึกไปแล้วหรือยัง
+                    // 🔒 ตรวจสอบว่า Ticket นี้ถูกจัดการไปแล้วหรือไม่ (ป้องกันการกดซ้ำ)
                     if (resolvedTickets.has(ticketId)) {
-                        console.log(`Ticket ${ticketId} has already been resolved.`);
+                        console.log(` Ticket ${ticketId} ถูกประมวลผลไปแล้ว (ข้ามการทำงาน)`);
                         continue;
                     }
 
-                    // บันทึกสถานะว่าทำรายการแล้ว
+                    // บันทึกสถานะเพื่อล็อกไม่ให้ประมวลผลซ้ำอีก
                     if (resolvedTickets.size > 3000) resolvedTickets.clear();
                     resolvedTickets.add(ticketId);
 
-                    console.log(`✅ Ticket ${ticketId} resolved by user.`);
-                    // 💡 ไม่ต้องมีโค้ดส่ง Reply back ฝั่งบอทอีกต่อไป ข้อความจะส่งขึ้นเฉพาะฝั่งคนกดผ่าน displayText
+                    console.log(`✅ บันทึกสถานะแก้ไข Ticket ID: ${ticketId} สำเร็จ`);
                 }
             }
 
