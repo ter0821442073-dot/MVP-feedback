@@ -1,35 +1,35 @@
-
 import express from 'express';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
- 
+
 dotenv.config();
- 
+
 const app = express();
- 
+
 // ซ่อนข้อมูล framework และกำหนดจำนวน proxy ที่เชื่อถือ (Vercel/Render/Nginx = 1)
 // ปรับด้วย env TRUST_PROXY ให้ตรงกับโครงสร้างจริง ไม่งั้น req.ip จะถูกปลอมได้
 app.disable('x-powered-by');
 app.set('trust proxy', Number(process.env.TRUST_PROXY ?? 1));
- 
+
 // ---------------------------------------------------------------------------
 // ⚙️ Config
 // ---------------------------------------------------------------------------
 const CONFIG = {
     maxTextLength: 1000,
     maxNameLength: 100,
-    rateLimitPerIp: Number(process.env.RATE_LIMIT_PER_IP) || 5,            // กี่ครั้ง ต่อ IP
+    // ลูกค้าในโรงภาพยนตร์มักใช้ WiFi เดียวกัน (IP เดียวกัน) จึงตั้งค่าเริ่มต้นให้สูงพอ
+    rateLimitPerIp: Number(process.env.RATE_LIMIT_PER_IP) || 30,           // กี่ครั้ง ต่อ IP
     rateLimitWindowSec: Number(process.env.RATE_LIMIT_WINDOW_SEC) || 600,  // ในกี่วินาที
-    rateLimitGlobalPerHour: Number(process.env.RATE_LIMIT_GLOBAL_PER_HOUR) || 100, // เพดานรวมทั้งระบบ (กัน quota LINE หมด)
+    rateLimitGlobalPerHour: Number(process.env.RATE_LIMIT_GLOBAL_PER_HOUR) || 300, // เพดานรวมทั้งระบบ (กัน quota LINE หมด)
     resolvedTtlSec: 60 * 60 * 24 * 90,   // จำสถานะ ticket ที่แก้แล้ว 90 วัน
     fetchTimeoutMs: 8000,
 };
- 
+
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PHONE_REGEX = /^[0-9+\-()\s]{6,20}$/;
- 
+
 const env = (name) => process.env[name]?.trim() || '';
- 
+
 // เตือนตั้งแต่เริ่มระบบ ถ้าตั้งค่าไม่ครบ
 (function checkEnvOnStartup() {
     if (!env('LINE_CHANNEL_SECRET')) console.error('❌ LINE_CHANNEL_SECRET is not set — /api/webhook will reject all requests');
@@ -39,7 +39,7 @@ const env = (name) => process.env[name]?.trim() || '';
         console.warn('⚠️ Redis is not configured — ใช้ in-memory แทน (เลขลำดับ/สถานะ ticket/rate limit จะหายเมื่อ restart และไม่ทำงานข้าม instance)');
     }
 })();
- 
+
 // ---------------------------------------------------------------------------
 // 🔒 Security Headers
 // ---------------------------------------------------------------------------
@@ -53,13 +53,13 @@ app.use((req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
     next();
 });
- 
+
 // CORS: ปิดไว้เป็นค่าเริ่มต้น (same-origin เท่านั้น)
 // ถ้าหน้าเว็บอยู่คนละโดเมน ให้ตั้ง ALLOWED_ORIGINS=https://example.com,https://www.example.com
 app.use('/api/feedback', (req, res, next) => {
     const allowed = env('ALLOWED_ORIGINS').split(',').map((s) => s.trim()).filter(Boolean);
     const origin = req.headers.origin;
- 
+
     if (origin && allowed.includes(origin)) {
         res.setHeader('Access-Control-Allow-Origin', origin);
         res.setHeader('Vary', 'Origin');
@@ -70,21 +70,21 @@ app.use('/api/feedback', (req, res, next) => {
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     next();
 });
- 
+
 // ---------------------------------------------------------------------------
 // 🌐 Helpers: fetch พร้อม timeout
 // ---------------------------------------------------------------------------
 function fetchWithTimeout(url, options = {}, timeoutMs = CONFIG.fetchTimeoutMs) {
     return fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
 }
- 
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
- 
+
 // ---------------------------------------------------------------------------
 // 🗄️ Storage Layer: Redis (Upstash REST) พร้อม fallback เป็น In-Memory
 // ---------------------------------------------------------------------------
 const redisEnabled = () => Boolean(env('UPSTASH_REDIS_REST_URL') && env('UPSTASH_REDIS_REST_TOKEN'));
- 
+
 async function redisRequest(path, body) {
     const baseUrl = env('UPSTASH_REDIS_REST_URL').replace(/\/+$/, '');
     const response = await fetchWithTimeout(`${baseUrl}${path}`, {
@@ -98,27 +98,27 @@ async function redisRequest(path, body) {
     if (!response.ok) throw new Error(`Redis HTTP ${response.status}`);
     return response.json();
 }
- 
+
 async function redisCommand(command) {
     const data = await redisRequest('', command);
     if (data.error) throw new Error(data.error);
     return data.result;
 }
- 
+
 async function redisPipeline(commands) {
     const data = await redisRequest('/pipeline', commands);
     const failed = data.find((item) => item.error);
     if (failed) throw new Error(failed.error);
     return data.map((item) => item.result);
 }
- 
+
 const memory = {
     resolved: new Set(),
     counterYear: null,
     counter: 0,
     rate: new Map(), // key -> { count, resetAt }
 };
- 
+
 // ล้างข้อมูล rate limit ที่หมดอายุใน memory
 setInterval(() => {
     const now = Date.now();
@@ -126,7 +126,7 @@ setInterval(() => {
         if (entry.resetAt <= now) memory.rate.delete(key);
     }
 }, 10 * 60 * 1000).unref();
- 
+
 /**
  * ดึงปี ค.ศ. ตามเวลาประเทศไทย (Asia/Bangkok)
  */
@@ -135,25 +135,43 @@ function getBangkokYear() {
         new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Bangkok', year: 'numeric' }).format(new Date())
     );
 }
- 
+
 /**
  * เลขลำดับ Feedback ประจำปี (รีเซ็ตเมื่อขึ้นปีใหม่)
  * ใช้ Redis INCR เพื่อให้เลขไม่ซ้ำ/ไม่รีเซ็ต แม้ระบบ restart หรือรันหลาย instance
  */
 async function getNextTicketNumber() {
     const year = getBangkokYear();
- 
+
     if (redisEnabled()) {
-        try {
-            const key = `feedback:ticket_counter:${year}`;
-            const n = await redisCommand(['INCR', key]);
-            if (n === 1) await redisCommand(['EXPIRE', key, 60 * 60 * 24 * 800]);
-            return n;
-        } catch (err) {
-            console.error('❌ Redis counter error (fallback to memory):', err.message);
+        // 🔒 โหมดเข้มงวด: ถ้า Redis ใช้ไม่ได้ จะไม่ถอยไปนับใน memory (เสี่ยงเลขซ้ำ) แต่ throw error ให้ผู้ใช้ส่งใหม่
+        const key = `feedback:ticket_counter:${year}`;
+        let lastError;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+            try {
+                const n = await redisCommand(['INCR', key]);
+                if (n === 1) {
+                    try {
+                        await redisCommand(['EXPIRE', key, 60 * 60 * 24 * 800]);
+                    } catch (e) {
+                        console.error('⚠️ Redis EXPIRE for counter failed (ignored):', e.message);
+                    }
+                }
+                return n;
+            } catch (err) {
+                lastError = err;
+                console.error(`❌ Redis counter error (attempt ${attempt}/2):`, err.message);
+                if (attempt < 2) await sleep(300);
+            }
         }
+        throw new Error(`TICKET_COUNTER_UNAVAILABLE: ${lastError?.message}`);
     }
- 
+
+    // ไม่ได้ตั้งค่า Redis เลย: ถ้าบังคับด้วย REQUIRE_REDIS=true จะไม่ยอมใช้ memory
+    if (env('REQUIRE_REDIS') === 'true') {
+        throw new Error('TICKET_COUNTER_UNAVAILABLE: Redis is required but not configured');
+    }
+
     if (memory.counterYear !== year) {
         memory.counterYear = year;
         memory.counter = 0;
@@ -161,7 +179,7 @@ async function getNextTicketNumber() {
     memory.counter += 1;
     return memory.counter;
 }
- 
+
 /**
  * บันทึกว่า Ticket ถูกแก้ไขแล้ว (atomic)
  * @returns {Promise<boolean>} true = เพิ่งบันทึกครั้งแรก, false = เคยถูกแก้ไขไปแล้ว
@@ -177,9 +195,9 @@ async function markTicketResolved(ticketId) {
             console.error('❌ Redis resolve error (fallback to memory):', err.message);
         }
     }
- 
+
     if (memory.resolved.has(ticketId)) return false;
- 
+
     if (memory.resolved.size >= 3000) {
         const oldest = memory.resolved.values().next().value;
         memory.resolved.delete(oldest);
@@ -187,7 +205,7 @@ async function markTicketResolved(ticketId) {
     memory.resolved.add(ticketId);
     return true;
 }
- 
+
 /**
  * Fixed-window rate limiter
  */
@@ -205,7 +223,7 @@ async function consumeRateLimit(key, limit, windowSec) {
             console.error('❌ Redis rate-limit error (fallback to memory):', err.message);
         }
     }
- 
+
     const now = Date.now();
     let entry = memory.rate.get(key);
     if (!entry || entry.resetAt <= now) {
@@ -218,35 +236,36 @@ async function consumeRateLimit(key, limit, windowSec) {
         retryAfterSec: Math.max(1, Math.ceil((entry.resetAt - now) / 1000))
     };
 }
- 
+
 async function feedbackRateLimit(req, res, next) {
     try {
         const ip = req.ip || 'unknown';
- 
+
         const perIp = await consumeRateLimit(`ip:${ip}`, CONFIG.rateLimitPerIp, CONFIG.rateLimitWindowSec);
         if (perIp.limited) {
             res.setHeader('Retry-After', String(perIp.retryAfterSec));
-            return res.status(429).json({ error: 'ส่งข้อความบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่' });
+            const waitMin = Math.max(1, Math.ceil(perIp.retryAfterSec / 60));
+            return res.status(429).json({ error: `ส่งข้อความบ่อยเกินไป กรุณารออีกประมาณ ${waitMin} นาทีแล้วลองใหม่` });
         }
- 
+
         const global = await consumeRateLimit('global', CONFIG.rateLimitGlobalPerHour, 3600);
         if (global.limited) {
             res.setHeader('Retry-After', String(global.retryAfterSec));
             return res.status(429).json({ error: 'ระบบมีผู้ใช้งานจำนวนมาก กรุณาลองใหม่ภายหลัง' });
         }
- 
+
         next();
     } catch (err) {
         console.error('❌ Rate limit middleware error:', err.message);
         next(); // ถ้าตัว limiter เสียเอง ไม่ควรทำให้ฟอร์มใช้ไม่ได้ทั้งระบบ
     }
 }
- 
+
 // ---------------------------------------------------------------------------
 // 🧹 Input Sanitizing & Validation
 // ---------------------------------------------------------------------------
 const codePointLength = (str) => [...str].length;
- 
+
 /**
  * ทำความสะอาดข้อความ: ลบ Control Characters, Null Bytes และอักขระควบคุมทิศทางข้อความ (Bidi)
  * ที่ใช้หลอกตาได้ (ไม่แปลงเป็น HTML Entities เพื่อให้แสดงผลบน LINE Flex ได้ถูกต้อง)
@@ -261,7 +280,7 @@ function cleanTextInput(input) {
         .replace(/\n{3,}/g, '\n\n')
         .trim();
 }
- 
+
 /**
  * ตรวจสอบ Cloudflare Turnstile (เปิดใช้เมื่อกำหนด TURNSTILE_SECRET_KEY)
  */
@@ -269,7 +288,7 @@ async function verifyTurnstile(token, ip) {
     const secret = env('TURNSTILE_SECRET_KEY');
     if (!secret) return true; // ไม่ได้เปิดใช้งาน
     if (typeof token !== 'string' || !token || token.length > 2048) return false;
- 
+
     try {
         const response = await fetchWithTimeout('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
             method: 'POST',
@@ -283,37 +302,37 @@ async function verifyTurnstile(token, ip) {
         return false;
     }
 }
- 
+
 // ---------------------------------------------------------------------------
 // 🔏 LINE Signature Verification
 // ---------------------------------------------------------------------------
 function saveRawBody(req, res, buf) {
     req.rawBody = buf;
 }
- 
+
 function verifyLineSignature(req, res, next) {
     const channelSecret = env('LINE_CHANNEL_SECRET');
     const signature = req.headers['x-line-signature'];
- 
+
     // 🔒 Fail-closed: ถ้าไม่ได้ตั้งค่า Secret ต้องปฏิเสธ ห้ามปล่อยผ่าน
     if (!channelSecret) {
         console.error('❌ LINE_CHANNEL_SECRET is not set. Rejecting webhook request.');
         return res.status(500).send('Server misconfigured');
     }
- 
+
     if (typeof signature !== 'string' || !req.rawBody) {
         return res.status(401).send('Unauthorized: Missing signature or body');
     }
- 
+
     const hash = crypto
         .createHmac('sha256', channelSecret)
         .update(req.rawBody)
         .digest('base64');
- 
+
     // 🔒 ป้องกัน Timing Attack
     const signatureBuffer = Buffer.from(signature);
     const hashBuffer = Buffer.from(hash);
- 
+
     if (
         signatureBuffer.length !== hashBuffer.length ||
         !crypto.timingSafeEqual(signatureBuffer, hashBuffer)
@@ -321,27 +340,27 @@ function verifyLineSignature(req, res, next) {
         console.error('❌ Invalid LINE Webhook Signature');
         return res.status(403).send('Forbidden: Invalid signature');
     }
- 
+
     next();
 }
- 
+
 // ---------------------------------------------------------------------------
 // 📤 LINE Messaging helpers
 // ---------------------------------------------------------------------------
 function buildFlexPayload({ customerText, name, phone, formattedDate, ticketSeqNumber, ticketId }) {
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
- 
+
     const singleLine = customerText.replace(/\s+/g, ' ');
     const shortAltText = codePointLength(singleLine) > 50
         ? [...singleLine].slice(0, 50).join('') + '...'
         : singleLine;
- 
+
     const postbackData = new URLSearchParams({
         action: 'resolve',
         ticket_id: ticketId,
         seq: String(ticketSeqNumber)
     }).toString();
- 
+
     return {
         type: 'flex',
         altText: `📬 Feedback ใหม่ (#${ticketSeqNumber}): ${shortAltText}`,
@@ -421,7 +440,7 @@ function buildFlexPayload({ customerText, name, phone, formattedDate, ticketSeqN
         }
     };
 }
- 
+
 /**
  * ส่ง LINE Push Alert (Flex Message)
  * ใช้ X-Line-Retry-Key ทำให้การ retry ปลอดภัย ไม่ส่งซ้ำ
@@ -429,15 +448,15 @@ function buildFlexPayload({ customerText, name, phone, formattedDate, ticketSeqN
 async function sendLinePushAlert(payloadData) {
     const channelToken = env('LINE_CHANNEL_ACCESS_TOKEN');
     const targetId = env('LINE_TARGET_ID');
- 
+
     if (!channelToken || !targetId) {
         console.error('❌ Missing LINE API Token or Target ID in environment variables');
         return false;
     }
- 
+
     const flexPayload = buildFlexPayload(payloadData);
     const body = JSON.stringify({ to: targetId, messages: [flexPayload] });
- 
+
     for (let attempt = 1; attempt <= 2; attempt++) {
         try {
             const response = await fetchWithTimeout('https://api.line.me/v2/bot/message/push', {
@@ -449,28 +468,28 @@ async function sendLinePushAlert(payloadData) {
                 },
                 body
             });
- 
+
             // 409 = LINE เคยรับ Retry Key นี้ไปแล้ว (ส่งสำเร็จไปก่อนหน้า)
             if (response.ok || response.status === 409) return true;
- 
+
             const errBody = (await response.text()).slice(0, 500);
             console.error(`❌ LINE API Rejected Push (HTTP ${response.status}):`, errBody);
- 
+
             // Error ฝั่งผู้ใช้ (4xx ยกเว้น 429) ไม่ต้อง retry
             if (response.status < 500 && response.status !== 429) return false;
         } catch (err) {
             console.error('❌ Network Error while sending LINE Push Alert:', err.message);
         }
- 
+
         if (attempt < 2) await sleep(500);
     }
     return false;
 }
- 
+
 async function sendLineReply(replyToken, text) {
     const channelToken = env('LINE_CHANNEL_ACCESS_TOKEN');
     if (!channelToken || !replyToken) return;
- 
+
     try {
         const response = await fetchWithTimeout('https://api.line.me/v2/bot/message/reply', {
             method: 'POST',
@@ -487,7 +506,7 @@ async function sendLineReply(replyToken, text) {
         console.error('❌ Network Error while sending LINE reply:', err.message);
     }
 }
- 
+
 // ---------------------------------------------------------------------------
 // 📝 Endpoint: รับ Feedback
 // ---------------------------------------------------------------------------
@@ -498,20 +517,20 @@ app.post(
     async (req, res) => {
         try {
             const body = req.body ?? {};
- 
+
             // 🍯 Honeypot: ฟิลด์ซ่อน "website" บอทมักกรอก ผู้ใช้จริงจะเว้นว่าง
             if (typeof body.website === 'string' && body.website.trim() !== '') {
                 return res.json({ success: true, line_sent: true }); // ตอบเหมือนสำเร็จ ไม่บอกบอท
             }
- 
+
             if (typeof body.text !== 'string') {
                 return res.status(400).json({ error: 'กรุณากรอกข้อความ Feedback ให้ถูกต้อง' });
             }
- 
+
             const cleanText = cleanTextInput(body.text);
             const cleanName = cleanTextInput(body.name);
             const cleanPhone = cleanTextInput(body.phone);
- 
+
             if (!cleanText) {
                 return res.status(400).json({ error: 'กรุณากรอกข้อความ Feedback ให้ถูกต้อง' });
             }
@@ -524,23 +543,33 @@ app.post(
             if (cleanPhone && !PHONE_REGEX.test(cleanPhone)) {
                 return res.status(400).json({ error: 'รูปแบบเบอร์โทรไม่ถูกต้อง' });
             }
- 
+
             // 🤖 ตรวจสอบ Turnstile (ถ้าเปิดใช้งาน)
             const humanOk = await verifyTurnstile(body.turnstileToken, req.ip);
             if (!humanOk) {
                 return res.status(403).json({ error: 'การตรวจสอบความปลอดภัยไม่ผ่าน กรุณาลองใหม่' });
             }
- 
+
             const now = new Date();
             const formattedDate = now.toLocaleString('th-TH', {
                 timeZone: 'Asia/Bangkok',
                 year: 'numeric', month: 'short', day: 'numeric',
                 hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
             }) + ' น.';
- 
-            const ticketSeqNumber = await getNextTicketNumber();
+
+            let ticketSeqNumber;
+            try {
+                ticketSeqNumber = await getNextTicketNumber();
+            } catch (err) {
+                console.error('❌ Cannot issue ticket number:', err.message);
+                return res.status(503).json({
+                    success: false,
+                    line_sent: false,
+                    error: 'ระบบไม่พร้อมให้บริการชั่วคราว กรุณาลองใหม่อีกครั้ง'
+                });
+            }
             const ticketId = crypto.randomUUID();
- 
+
             const lineSuccess = await sendLinePushAlert({
                 customerText: cleanText,
                 name: cleanName,
@@ -549,7 +578,7 @@ app.post(
                 ticketSeqNumber,
                 ticketId
             });
- 
+
             if (!lineSuccess) {
                 // แจ้งผู้ใช้ตามจริงว่าไม่สำเร็จ เพื่อให้กดส่งใหม่ได้ ไม่ใช่ตอบว่าสำเร็จทั้งที่ข้อความหาย
                 return res.status(502).json({
@@ -558,7 +587,7 @@ app.post(
                     error: 'ไม่สามารถส่งข้อความได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง'
                 });
             }
- 
+
             return res.json({ success: true, line_sent: true });
         } catch (error) {
             console.error('❌ Error inside /api/feedback:', error.message);
@@ -566,20 +595,20 @@ app.post(
         }
     }
 );
- 
+
 // ---------------------------------------------------------------------------
 // 🤖 Endpoint: LINE Webhook
 // ---------------------------------------------------------------------------
 async function handlePostback(event) {
     const targetId = env('LINE_TARGET_ID');
- 
+
     // 🔒 รับเฉพาะ Postback ที่มาจากกลุ่ม/ห้องเป้าหมายของระบบเท่านั้น
     const sourceId = event.source?.groupId || event.source?.roomId || event.source?.userId;
     if (targetId && sourceId !== targetId) {
         console.warn('⚠️ Ignored postback from non-target source');
         return;
     }
- 
+
     let params;
     try {
         params = new URLSearchParams(event.postback?.data || '');
@@ -587,46 +616,46 @@ async function handlePostback(event) {
         console.error('❌ Error parsing postback data:', e.message);
         return;
     }
- 
+
     const action = params.get('action');
     const ticketId = params.get('ticket_id');
     const seq = params.get('seq');
- 
+
     if (action !== 'resolve' || !ticketId || !UUID_REGEX.test(ticketId)) return;
- 
+
     const isFirstResolve = await markTicketResolved(ticketId);
- 
+
     if (!isFirstResolve) {
         console.log(`⚠️ Ticket ID: ${ticketId} ถูกแก้ไขไปแล้ว (ข้ามการประมวลผล)`);
         await sendLineReply(event.replyToken, `ℹ️ Feedback #${seq || '?'} ถูกทำเครื่องหมายว่าแก้ไขแล้วก่อนหน้านี้`);
         return;
     }
- 
+
     console.log(`✅ บันทึกการแก้ไข Ticket ID: ${ticketId} (#${seq || '?'}) สำเร็จ`);
 }
- 
+
 async function handleTextMessage(event) {
     const groupId = event.source?.groupId;
     const text = event.message?.text;
- 
+
     if (!groupId || !event.replyToken || typeof text !== 'string') return;
     if (text.toLowerCase().trim() !== 'id') return;
- 
+
     // คำสั่ง "id" ใช้สำหรับตั้งค่าครั้งแรก — ปิดอัตโนมัติเมื่อมี LINE_TARGET_ID แล้ว
     // (หากต้องการเปิดต่อ ให้ตั้ง ENABLE_ID_COMMAND=true)
     const idCommandEnabled = !env('LINE_TARGET_ID') || env('ENABLE_ID_COMMAND') === 'true';
     if (!idCommandEnabled) return;
- 
+
     await sendLineReply(event.replyToken, `📌 Group ID ของกลุ่มนี้คือ:\n${groupId}`);
 }
- 
+
 app.post(
     '/api/webhook',
     express.json({ limit: '256kb', verify: saveRawBody }),
     verifyLineSignature,
     async (req, res) => {
         const events = Array.isArray(req.body?.events) ? req.body.events : [];
- 
+
         for (const event of events) {
             try {
                 if (event.type === 'postback') {
@@ -639,19 +668,19 @@ app.post(
                 console.error('❌ Webhook event error:', err.message);
             }
         }
- 
+
         // ตอบ 200 เสมอ เพื่อไม่ให้ LINE ส่ง event เดิมซ้ำ
         return res.status(200).send('OK');
     }
 );
- 
+
 // ---------------------------------------------------------------------------
 // 🚧 404 & Global Error Handler
 // ---------------------------------------------------------------------------
 app.use((req, res) => {
     res.status(404).json({ error: 'Not found' });
 });
- 
+
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
     if (err.type === 'entity.too.large') {
@@ -663,5 +692,5 @@ app.use((err, req, res, next) => {
     console.error('❌ Unhandled error:', err.message);
     res.status(500).json({ error: 'เกิดข้อผิดพลาดภายในระบบ' });
 });
- 
+
 export default app;
