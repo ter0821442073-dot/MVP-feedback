@@ -22,7 +22,7 @@ app.use(express.json({
     }
 }));
 
-// In-Memory State สำหรับจดจำสถานะ Ticket
+// In-Memory State สำหรับจดจำสถานะ Ticket ที่ถูกกดแก้ไขไปแล้ว
 const resolvedTickets = new Set();
 
 /**
@@ -159,12 +159,11 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate) {
                     {
                         type: "button",
                         action: {
-                            type: "postback",
+                            // 💡 ใช้ datetimepicker แทน postback เพื่อไม่ให้แสดงข้อความบน Client อัตโนมัติ
+                            type: "datetimepicker",
                             label: "☑ ทำการแก้ไขแล้ว",
-                            // 💡 ส่งเฉพาะ action และ ticket_id สั้นๆ
                             data: `action=resolve&ticket_id=${ticketId}`,
-                            // 💡 ข้อความที่แสดงในแชตฝั่งคนกด
-                            displayText: `รับทราบ/ทำการแก้ไข Feedback เรียบร้อยแล้ว`
+                            mode: "time"
                         },
                         style: "primary",
                         color: "#007bff",
@@ -241,8 +240,9 @@ app.post('/api/webhook', verifyLineSignature, async (req, res) => {
         const events = req.body.events || [];
 
         for (const event of events) {
-            // เมื่อมีการกดปุ่ม Postback
+            // เมื่อมีการกดปุ่ม (รับ Event จาก datetimepicker / postback)
             if (event.type === 'postback') {
+                const replyToken = event.replyToken;
                 let ticketId = null;
 
                 try {
@@ -253,10 +253,42 @@ app.post('/api/webhook', verifyLineSignature, async (req, res) => {
                 }
 
                 if (ticketId) {
+                    // 🔒 ตรวจสอบว่า Ticket ID นี้ถูกดำเนินการไปแล้วหรือยัง
+                    if (resolvedTickets.has(ticketId)) {
+                        // ถ้าเคยแก้ไปแล้ว -> ไม่ต้องทำอะไรเลย (ไม่มีข้อความแจ้งเตือนขึ้น)
+                        continue;
+                    }
+
+                    // บันทึก Ticket ID ไว้ว่าทำรายการแล้ว
                     if (resolvedTickets.size > 3000) resolvedTickets.clear();
                     resolvedTickets.add(ticketId);
+
+                    // สร้างเวลาปัจจุบันเพื่อใส่ในข้อความตอบกลับ
+                    const currentTime = new Date().toLocaleString('th-TH', {
+                        timeZone: 'Asia/Bangkok',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: false
+                    });
+
+                    // ส่งข้อความแจ้งเตือนเฉพาะในการกดครั้งแรกเท่านั้น
+                    if (replyToken && channelToken) {
+                        await fetch('https://api.line.me/v2/bot/message/reply', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${channelToken}`
+                            },
+                            body: JSON.stringify({
+                                replyToken: replyToken,
+                                messages: [{
+                                    type: 'text',
+                                    text: `รับทราบ/ทำการแก้ไข Feedback เรียบร้อยแล้ว เมื่อเวลา ${currentTime} น.`
+                                }]
+                            })
+                        });
+                    }
                 }
-                // 💡 ยกเลิกการส่ง Reply Message ตอบกลับ เพื่อไม่ต้องมีกล่องข้อความจาก Bot เด้งซ้ำ
             }
 
             // คำสั่งพิมพ์ 'id' เพื่อเช็ก Group ID
