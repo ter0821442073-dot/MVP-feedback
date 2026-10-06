@@ -1,6 +1,8 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 
 dotenv.config();
 
@@ -33,25 +35,51 @@ function getBangkokYear() {
     return new Date(bangkokDateStr).getFullYear();
 }
 
-// 🔢 ระบบนับลำดับและรีเซ็ตทุกปี (In-Memory State)
-let currentYear = getBangkokYear();
-let ticketCounter = 0;
+// -------------------------------------------------------------
+// 📁 ระบบบันทึกเลขลำดับลงไฟล์ JSON (Persistent Counter)
+// -------------------------------------------------------------
+const COUNTER_FILE_PATH = path.join(process.cwd(), 'ticket_counter.json');
 
 /**
- * ฟังก์ชันดึงเลขลำดับประจำปี (จะรีเซ็ตเป็น 1 เมื่อเข้าสู่ปีใหม่)
+ * ฟังก์ชันอ่านข้อมูลตัวนับล่าสุดจากไฟล์
+ */
+function loadCounterData() {
+    try {
+        if (fs.existsSync(COUNTER_FILE_PATH)) {
+            const data = fs.readFileSync(COUNTER_FILE_PATH, 'utf8');
+            return JSON.parse(data);
+        }
+    } catch (err) {
+        console.error('⚠️ ไม่สามารถอ่านไฟล์ counter ได้:', err.message);
+    }
+    return { year: getBangkokYear(), count: 0 };
+}
+
+/**
+ * ฟังก์ชันดึงเลขลำดับประจำปี (รีเซ็ตเป็น 1 เมื่อเปลี่ยนปีใหม่ และบันทึกลงไฟล์)
  */
 function getNextTicketNumber() {
     const nowYear = getBangkokYear();
+    let counterData = loadCounterData();
 
-    // ถ้าปีปัจจุบันไม่ตรงกับปีที่บันทึกไว้ ให้รีเซ็ตตัวนับกลับเป็น 0
-    if (nowYear !== currentYear) {
-        currentYear = nowYear;
-        ticketCounter = 0; 
+    // เช็กว่าเข้าสู่ปีใหม่แล้วหรือยัง
+    if (counterData.year !== nowYear) {
+        counterData.year = nowYear;
+        counterData.count = 0; // รีเซ็ตเมื่อเริ่มปีใหม่
     }
 
-    ticketCounter += 1;
-    return ticketCounter;
+    counterData.count += 1; // เพิ่มทีละ 1
+
+    // บันทึกค่าล่าสุดกลับลงไฟล์ JSON
+    try {
+        fs.writeFileSync(COUNTER_FILE_PATH, JSON.stringify(counterData, null, 2), 'utf8');
+    } catch (err) {
+        console.error('❌ ไม่สามารถบันทึกไฟล์ counter ได้:', err.message);
+    }
+
+    return counterData.count;
 }
+// -------------------------------------------------------------
 
 /**
  * ฟังก์ชันกรองข้อความ (Sanitize) ป้องกัน XSS สคริปต์แบบพื้นฐาน
@@ -111,7 +139,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, timeO
 
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
     
-    // ดึงลำดับเลขประจำปี (เพิ่มขึ้นทีละ 1 และรีเซ็ตเมื่อเข้าปีใหม่)
+    // ดึงลำดับเลขประจำปี (รันเพิ่มทีละ 1 ถาวร และรีเซ็ตอัตโนมัติเมื่อเข้าปีใหม่)
     const ticketSeqNumber = getNextTicketNumber();
     
     // สุ่มสร้าง Ticket ID สำหรับ Postback
