@@ -93,9 +93,15 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate) {
     // สุ่มสร้าง Ticket ID
     const ticketId = `${Date.now().toString().slice(-6)}${Math.floor(Math.random() * 10)}`;
 
+    // ตัดความยาวข้อความสำหรับ altText (LINE จำกัดที่ 400 ตัวอักษร)
+    const shortAltText = customerText.length > 50 ? customerText.substring(0, 50) + '...' : customerText;
+
+    // ตัดความยาวข้อความสำหรับ Postback Data (LINE จำกัด postback data ที่ 300 ตัวอักษร)
+    const shortFeedbackForData = customerText.length > 80 ? customerText.substring(0, 80) + '...' : customerText;
+
     const flexPayload = {
         type: "flex",
-        altText: `📬 Feedback ใหม่: ${customerText}`,
+        altText: `📬 Feedback ใหม่: ${shortAltText}`,
         contents: {
             type: "bubble",
             header: {
@@ -117,7 +123,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate) {
                         margin: "xs"
                     }
                 ],
-                backgroundColor: "#03C755", // ปรับเป็นสีเขียว LINE มาตรฐาน (หรือเปลี่ยนเป็นสีที่ต้องการ)
+                backgroundColor: "#03C755",
                 paddingAll: "md"
             },
             body: {
@@ -165,7 +171,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate) {
                         action: {
                             type: "postback",
                             label: "☑ ทำการแก้ไขแล้ว",
-                            data: `action=resolve&ticket_id=${ticketId}&feedback_text=${encodeURIComponent(customerText)}`,
+                            data: `action=resolve&ticket_id=${ticketId}&feedback_text=${encodeURIComponent(shortFeedbackForData)}`,
                             displayText: `รับทราบ/ทำการแก้ไข Feedback เรียบร้อยแล้ว`
                         },
                         style: "primary",
