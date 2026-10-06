@@ -6,7 +6,7 @@ dotenv.config();
 
 const app = express();
 
-// --- 🔒 เพิ่ม Security Headers เพื่อป้องกัน XSS และ Vulnerabilities ---
+// --- 🔒 Security Headers ป้องกัน XSS และ Vulnerabilities ---
 app.use((req, res, next) => {
     res.setHeader('X-XSS-Protection', '1; mode=block');
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -22,7 +22,7 @@ app.use(express.json({
     }
 }));
 
-// In-Memory State สำหรับจดจำสถานะ Ticket (ป้องกันการกดซ้ำ)
+// In-Memory Cache สำหรับจดจำสถานะ Ticket (แนะนำให้เปลี่ยนไปใช้ Redis ในระยะยาว)
 const resolvedTickets = new Set();
 
 /**
@@ -33,7 +33,7 @@ function getBangkokYear() {
     return new Date(bangkokDateStr).getFullYear();
 }
 
-// 🔢 ระบบนับลำดับและรีเซ็ตทุกปี (In-Memory State)
+// 🔢 ระบบนับลำดับประจำปี
 let currentYear = getBangkokYear();
 let ticketCounter = 0;
 
@@ -43,10 +43,9 @@ let ticketCounter = 0;
 function getNextTicketNumber() {
     const nowYear = getBangkokYear();
 
-    // ถ้าปีปัจจุบันไม่ตรงกับปีที่บันทึกไว้ ให้รีเซ็ตตัวนับกลับเป็น 0
     if (nowYear !== currentYear) {
         currentYear = nowYear;
-        ticketCounter = 0; 
+        ticketCounter = 0;
     }
 
     ticketCounter += 1;
@@ -54,22 +53,18 @@ function getNextTicketNumber() {
 }
 
 /**
- * ฟังก์ชันกรองข้อความ (Sanitize) ป้องกัน XSS สคริปต์แบบพื้นฐาน
+ * ฟังก์ชันทำความสะอาดข้อความ ป้องกัน Control Characters และ Null Bytes Injection
+ * (ไม่แปลงเป็น HTML Entities เพื่อให้แสดงผลบน LINE Flex Message ได้ถูกต้องสวยงาม)
  */
-function sanitizeInput(input) {
+function cleanTextInput(input) {
     if (typeof input !== 'string') return '';
     return input
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#x27;')
-        .replace(/\//g, '&#x2F;')
+        .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '') // ลบ Control Characters
         .trim();
 }
 
 /**
- * Middleware ตรวจสอบ Signature จาก LINE เพื่อความปลอดภัย
+ * Middleware ตรวจสอบ Signature จาก LINE พร้อมป้องกัน Timing Attack
  */
 function verifyLineSignature(req, res, next) {
     const channelSecret = process.env.LINE_CHANNEL_SECRET?.trim();
@@ -89,7 +84,14 @@ function verifyLineSignature(req, res, next) {
         .update(req.rawBody)
         .digest('base64');
 
-    if (hash !== signature) {
+    // 🔒 ป้องกัน Timing Attack ด้วย crypto.timingSafeEqual
+    const signatureBuffer = Buffer.from(signature);
+    const hashBuffer = Buffer.from(hash);
+
+    if (
+        signatureBuffer.length !== hashBuffer.length ||
+        !crypto.timingSafeEqual(signatureBuffer, hashBuffer)
+    ) {
         console.error('❌ Invalid LINE Webhook Signature');
         return res.status(403).send('Forbidden: Invalid signature');
     }
@@ -111,13 +113,13 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, timeO
 
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
     
-    // ดึงลำดับเลขประจำปี (เพิ่มขึ้นทีละ 1 และรีเซ็ตเมื่อเข้าปีใหม่)
+    // ดึงลำดับเลขประจำปี
     const ticketSeqNumber = getNextTicketNumber();
     
-    // สุ่มสร้าง Ticket ID สำหรับ Postback
-    const ticketId = `${Date.now().toString().slice(-6)}${Math.floor(Math.random() * 10)}`;
+    // สร้าง Unique Ticket ID ป้องกันการซ้ำซ้อน
+    const ticketId = crypto.randomUUID();
 
-    // ตัดความยาวข้อความสำหรับ altText (LINE จำกัดที่ 400 ตัวอักษร)
+    // ตัดความยาวข้อความสำหรับ altText (LINE จำกัดความยาว)
     const shortAltText = customerText.length > 50 ? customerText.substring(0, 50) + '...' : customerText;
 
     const flexPayload = {
@@ -255,10 +257,10 @@ app.post('/api/feedback', async (req, res) => {
             return res.status(400).json({ error: 'กรุณากรอกข้อความ Feedback ให้ถูกต้อง' });
         }
 
-        // 🔒 ทำการ Sanitize ข้อมูลเพื่อป้องกัน XSS
-        const sanitizedText = sanitizeInput(text);
-        const sanitizedName = sanitizeInput(name);
-        const sanitizedPhone = sanitizeInput(phone);
+        // 🔒 ทำความสะอาดข้อมูลข้อความก่อนนำไปใช้งาน
+        const cleanText = cleanTextInput(text);
+        const cleanName = cleanTextInput(name);
+        const cleanPhone = cleanTextInput(phone);
 
         const now = new Date();
         const formattedDate = now.toLocaleString('th-TH', {
@@ -272,7 +274,7 @@ app.post('/api/feedback', async (req, res) => {
             hour: '2-digit', minute: '2-digit', hour12: false
         });
 
-        const lineSuccess = await sendLinePushAlert(sanitizedText, sanitizedName, sanitizedPhone, formattedDate, timeOnly);
+        const lineSuccess = await sendLinePushAlert(cleanText, cleanName, cleanPhone, formattedDate, timeOnly);
 
         return res.json({ 
             success: true, 
@@ -303,15 +305,19 @@ app.post('/api/webhook', verifyLineSignature, async (req, res) => {
                 }
 
                 if (ticketId) {
-                    // 🔒 ตรวจสอบว่า Ticket นี้ถูกบันทึกไปแล้วหรือยัง (ป้องกันการล็อกประมวลผลซ้ำ)
+                    // 🔒 ตรวจสอบว่า Ticket นี้ถูกบันทึกไปแล้วหรือยัง
                     if (resolvedTickets.has(ticketId)) {
                         console.log(`⚠️ Ticket ID: ${ticketId} ถูกแก้ไขไปแล้ว (ข้ามการประมวลผล)`);
                         continue;
                     }
 
-                    if (resolvedTickets.size > 3000) resolvedTickets.clear();
+                    // ป้องกัน Memory Leak โดยการลบรายการที่เก่าที่สุดเมื่อ Set มีขนาดใหญ่เกินไป
+                    if (resolvedTickets.size > 3000) {
+                        const oldestTicket = resolvedTickets.values().next().value;
+                        resolvedTickets.delete(oldestTicket);
+                    }
+                    
                     resolvedTickets.add(ticketId);
-
                     console.log(`✅ บันทึกการแก้ไข Ticket ID: ${ticketId} สำเร็จ`);
                 }
             }
