@@ -89,9 +89,6 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate) {
     // ตัดความยาวข้อความสำหรับ altText (LINE จำกัดที่ 400 ตัวอักษร)
     const shortAltText = customerText.length > 50 ? customerText.substring(0, 50) + '...' : customerText;
 
-    // ตัดความยาวข้อความสำหรับ Postback Data (LINE จำกัด postback data ที่ 300 ตัวอักษร)
-    const shortFeedbackForData = customerText.length > 80 ? customerText.substring(0, 80) + '...' : customerText;
-
     const flexPayload = {
         type: "flex",
         altText: `📬 Feedback ใหม่: ${shortAltText}`,
@@ -164,7 +161,9 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate) {
                         action: {
                             type: "postback",
                             label: "☑ ทำการแก้ไขแล้ว",
-                            data: `action=resolve&ticket_id=${ticketId}&feedback_text=${encodeURIComponent(shortFeedbackForData)}`,
+                            // 💡 ส่งเฉพาะ action และ ticket_id สั้นๆ
+                            data: `action=resolve&ticket_id=${ticketId}`,
+                            // 💡 ข้อความที่แสดงในแชตฝั่งคนกด
                             displayText: `รับทราบ/ทำการแก้ไข Feedback เรียบร้อยแล้ว`
                         },
                         style: "primary",
@@ -242,58 +241,25 @@ app.post('/api/webhook', verifyLineSignature, async (req, res) => {
         const events = req.body.events || [];
 
         for (const event of events) {
+            // เมื่อมีการกดปุ่ม Postback
             if (event.type === 'postback') {
-                const replyToken = event.replyToken;
-                
                 let ticketId = null;
-                let feedbackText = '';
 
                 try {
                     const postbackData = new URLSearchParams(event.postback.data);
                     ticketId = postbackData.get('ticket_id');
-                    feedbackText = postbackData.get('feedback_text') || '';
                 } catch (e) {
                     console.error('❌ Error parsing postback data:', e.message);
                 }
 
-                if (replyToken && channelToken) {
-                    let updateMessage = '';
-
-                    if (ticketId && resolvedTickets.has(ticketId)) {
-                        updateMessage = `⚠ [แจ้งเตือน]\nFeedback นี้ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`;
-                    } else {
-                        if (ticketId) {
-                            // 💡 เคลียร์ Memory ป้องกันสืบทอดสะสม หากมีมากกว่า 3,000 รายการ
-                            if (resolvedTickets.size > 3000) resolvedTickets.clear();
-                            resolvedTickets.add(ticketId);
-                        }
-                        const now = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' });
-                        
-                        let decodedText = feedbackText;
-                        try {
-                            decodedText = decodeURIComponent(feedbackText);
-                        } catch (e) { /* ignore decode error */ }
-
-                        updateMessage = `✅ [อัปเดตสถานะ]\nFeedback: "${decodedText}"\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`;
-                    }
-
-                    await fetch('https://api.line.me/v2/bot/message/reply', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${channelToken}`
-                        },
-                        body: JSON.stringify({
-                            replyToken: replyToken,
-                            messages: [{
-                                type: 'text',
-                                text: updateMessage
-                            }]
-                        })
-                    });
+                if (ticketId) {
+                    if (resolvedTickets.size > 3000) resolvedTickets.clear();
+                    resolvedTickets.add(ticketId);
                 }
+                // 💡 ยกเลิกการส่ง Reply Message ตอบกลับ เพื่อไม่ต้องมีกล่องข้อความจาก Bot เด้งซ้ำ
             }
 
+            // คำสั่งพิมพ์ 'id' เพื่อเช็ก Group ID
             if (event.type === 'message' && event.message.type === 'text') {
                 const groupId = event.source.groupId;
                 const replyToken = event.replyToken;
