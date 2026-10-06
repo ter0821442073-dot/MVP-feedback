@@ -6,6 +6,15 @@ dotenv.config();
 
 const app = express();
 
+// --- 🔒 เพิ่ม Security Headers เพื่อป้องกัน XSS และ Vulnerabilities ---
+app.use((req, res, next) => {
+    res.setHeader('X-XSS-Protection', '1; mode=block');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+});
+
 // หมายเหตุ: LINE Webhook จำเป็นต้องใช้ raw body ในการตรวจสอบ HMAC Signature
 app.use(express.json({
     verify: (req, res, buf) => {
@@ -22,6 +31,21 @@ setInterval(() => {
         resolvedTickets.clear();
     }
 }, 3600000);
+
+/**
+ * ฟังก์ชันกรองข้อความ (Sanitize) ป้องกัน XSS สคริปต์แบบพื้นฐาน
+ */
+function sanitizeInput(input) {
+    if (typeof input !== 'string') return '';
+    return input
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#x27;')
+        .replace(/\//g, '&#x2F;')
+        .trim();
+}
 
 /**
  * Middleware ตรวจสอบ Signature จาก LINE เพื่อความปลอดภัย
@@ -183,9 +207,15 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate) {
 app.post('/api/feedback', async (req, res) => {
     try {
         const { text, name, phone } = req.body;
+        
         if (!text || typeof text !== 'string' || !text.trim()) {
             return res.status(400).json({ error: 'กรุณากรอกข้อความ Feedback ให้ถูกต้อง' });
         }
+
+        // 🔒 ทำการ Sanitize ข้อมูลเพื่อป้องกัน XSS
+        const sanitizedText = sanitizeInput(text);
+        const sanitizedName = sanitizeInput(name);
+        const sanitizedPhone = sanitizeInput(phone);
 
         const now = new Date();
         const formattedDate = now.toLocaleString('th-TH', {
@@ -194,7 +224,7 @@ app.post('/api/feedback', async (req, res) => {
             hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
         }) + ' น.';
 
-        const lineSuccess = await sendLinePushAlert(text, name, phone, formattedDate);
+        const lineSuccess = await sendLinePushAlert(sanitizedText, sanitizedName, sanitizedPhone, formattedDate);
 
         return res.json({ 
             success: true, 
