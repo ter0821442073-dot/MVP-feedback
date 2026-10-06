@@ -22,7 +22,7 @@ app.use(express.json({
     }
 }));
 
-// In-Memory State สำหรับจดจำสถานะ Ticket ที่ถูกกดแก้ไขไปแล้ว (กันประมวลผลซ้ำ)
+// In-Memory State สำหรับจดจำสถานะ Ticket (ป้องกันการกดซ้ำ)
 const resolvedTickets = new Set();
 
 /**
@@ -161,9 +161,10 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, timeO
                         action: {
                             type: "postback",
                             label: "☑ ทำการแก้ไขแล้ว",
+                            // 💡 ส่งเฉพาะ action และ ticket_id
                             data: `action=resolve&ticket_id=${ticketId}`,
-                            // 💡 แนบเวลาลงใน displayText โดยตรง เพื่อให้พิมพ์ออกมาจากฝั่งผู้ใช้ (บอลลูนสีเขียวทางขวา)
-                            displayText: `รับทราบ/ทำการแก้ไข Feedback เรียบร้อยแล้ว เมื่อเวลา ${timeOnly} น.`
+                            // 💡 แนบเวลาลงใน displayText โดยตรง เพื่อให้พิมพ์ออกมาฝั่งคนกด
+                            displayText: `รับทราบ/ทำการแก้ไข Feedback เรียบร้อยแล้ว (เวลา ${timeOnly} น.)`
                         },
                         style: "primary",
                         color: "#007bff",
@@ -245,7 +246,7 @@ app.post('/api/webhook', verifyLineSignature, async (req, res) => {
         const events = req.body.events || [];
 
         for (const event of events) {
-            // เมื่อมีการกดปุ่ม postback จาก Flex Message
+            // เมื่อมีการกดปุ่ม Postback
             if (event.type === 'postback') {
                 let ticketId = null;
 
@@ -257,18 +258,18 @@ app.post('/api/webhook', verifyLineSignature, async (req, res) => {
                 }
 
                 if (ticketId) {
-                    // 🔒 ตรวจสอบว่า Ticket นี้ถูกจัดการไปแล้วหรือไม่ (ป้องกันการกดซ้ำ)
+                    // 🔒 ตรวจสอบว่า Ticket นี้ถูกบันทึกไปแล้วหรือยัง (ป้องกันการล็อกประมวลผลซ้ำ)
                     if (resolvedTickets.has(ticketId)) {
-                        console.log(` Ticket ${ticketId} ถูกประมวลผลไปแล้ว (ข้ามการทำงาน)`);
+                        console.log(`⚠️ Ticket ID: ${ticketId} ถูกแก้ไขไปแล้ว (ข้ามการประมวลผล)`);
                         continue;
                     }
 
-                    // บันทึกสถานะเพื่อล็อกไม่ให้ประมวลผลซ้ำอีก
                     if (resolvedTickets.size > 3000) resolvedTickets.clear();
                     resolvedTickets.add(ticketId);
 
-                    console.log(`✅ บันทึกสถานะแก้ไข Ticket ID: ${ticketId} สำเร็จ`);
+                    console.log(`✅ บันทึกการแก้ไข Ticket ID: ${ticketId} สำเร็จ`);
                 }
+                // 💡 ไม่ส่ง Reply Message ตอบกลับ เพื่อไม่ให้มีข้อความจาก Bot เด้งซ้ำ
             }
 
             // คำสั่งพิมพ์ 'id' เพื่อเช็ก Group ID
