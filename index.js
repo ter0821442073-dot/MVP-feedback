@@ -6,7 +6,7 @@ dotenv.config();
 
 const app = express();
 
-// --- 🔒 Security Headers ---
+// --- 🔒 เพิ่ม Security Headers เพื่อป้องกัน XSS และ Vulnerabilities ---
 app.use((req, res, next) => {
     res.setHeader('X-XSS-Protection', '1; mode=block');
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -15,7 +15,7 @@ app.use((req, res, next) => {
     next();
 });
 
-// LINE Webhook raw body
+// หมายเหตุ: LINE Webhook จำเป็นต้องใช้ raw body ในการตรวจสอบ HMAC Signature
 app.use(express.json({
     verify: (req, res, buf) => {
         req.rawBody = buf;
@@ -25,7 +25,7 @@ app.use(express.json({
 // In-Memory State สำหรับจดจำสถานะ Ticket
 const resolvedTickets = new Set();
 
-// ล้าง Ticket ที่เก่าเกินไปทุกๆ 1 ชั่วโมง
+// ล้าง Ticket ที่เก่าเกินไปทุกๆ 1 ชั่วโมงเพื่อป้องกัน Memory Leak
 setInterval(() => {
     if (resolvedTickets.size > 5000) {
         resolvedTickets.clear();
@@ -33,7 +33,22 @@ setInterval(() => {
 }, 3600000);
 
 /**
- * Middleware ตรวจสอบ Signature จาก LINE
+ * ฟังก์ชันกรองข้อความ (Sanitize) ป้องกัน XSS สคริปต์แบบพื้นฐาน
+ */
+function sanitizeInput(input) {
+    if (typeof input !== 'string') return '';
+    return input
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#x27;')
+        .replace(/\//g, '&#x2F;')
+        .trim();
+}
+
+/**
+ * Middleware ตรวจสอบ Signature จาก LINE เพื่อความปลอดภัย
  */
 function verifyLineSignature(req, res, next) {
     const channelSecret = process.env.LINE_CHANNEL_SECRET?.trim();
@@ -62,7 +77,7 @@ function verifyLineSignature(req, res, next) {
 }
 
 /**
- * ฟังก์ชันส่ง LINE Push Alert ด้วย Flex Message
+ * ฟังก์ชันส่ง LINE Push Alert ด้วย Flex Message (ตัดการแสดงผล AI ออกแล้ว)
  */
 async function sendLinePushAlert(customerText, name, phone, formattedDate) {
     const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN?.trim();
@@ -78,8 +93,11 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate) {
     // สุ่มสร้าง Ticket ID
     const ticketId = `${Date.now().toString().slice(-6)}${Math.floor(Math.random() * 10)}`;
 
-    // ตัด altText ไม่ให้เกิน 400 ตัวอักษรตามเกณฑ์ LINE API
+    // ตัดความยาวข้อความสำหรับ altText (LINE จำกัดที่ 400 ตัวอักษร)
     const shortAltText = customerText.length > 50 ? customerText.substring(0, 50) + '...' : customerText;
+
+    // ตัดความยาวข้อความสำหรับ Postback Data (LINE จำกัด postback data ที่ 300 ตัวอักษร)
+    const shortFeedbackForData = customerText.length > 80 ? customerText.substring(0, 80) + '...' : customerText;
 
     const flexPayload = {
         type: "flex",
@@ -135,7 +153,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate) {
                         layout: "vertical",
                         contents: [
                             { type: "text", text: "💬 ข้อความที่ได้รับ:", size: "xs", color: "#8c8c8c" },
-                            { type: "text", text: `"${customerText}"`, size: "md", color: "#111111", weight: "bold", wrap: true, margin: "xs" }
+                            { type: "text", text: `"${customerText}"`, size: "lg", color: "#111111", weight: "bold", wrap: true, margin: "xs" }
                         ],
                         margin: "md",
                         backgroundColor: "#f8f9fa",
@@ -153,8 +171,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate) {
                         action: {
                             type: "postback",
                             label: "☑ ทำการแก้ไขแล้ว",
-                            // ปรับให้เหลือเฉพาะ ticket_id เพื่อไม่ให้ data ยาวเกินกำหนด 300 ตัวอักษรของ LINE
-                            data: `action=resolve&ticket_id=${ticketId}`,
+                            data: `action=resolve&ticket_id=${ticketId}&feedback_text=${encodeURIComponent(shortFeedbackForData)}`,
                             displayText: `รับทราบ/ทำการแก้ไข Feedback เรียบร้อยแล้ว`
                         },
                         style: "primary",
@@ -201,9 +218,10 @@ app.post('/api/feedback', async (req, res) => {
             return res.status(400).json({ error: 'กรุณากรอกข้อความ Feedback ให้ถูกต้อง' });
         }
 
-        const rawText = text.trim();
-        const rawName = typeof name === 'string' ? name.trim() : '';
-        const rawPhone = typeof phone === 'string' ? phone.trim() : '';
+        // 🔒 ทำการ Sanitize ข้อมูลเพื่อป้องกัน XSS
+        const sanitizedText = sanitizeInput(text);
+        const sanitizedName = sanitizeInput(name);
+        const sanitizedPhone = sanitizeInput(phone);
 
         const now = new Date();
         const formattedDate = now.toLocaleString('th-TH', {
@@ -212,7 +230,7 @@ app.post('/api/feedback', async (req, res) => {
             hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
         }) + ' น.';
 
-        const lineSuccess = await sendLinePushAlert(rawText, rawName, rawPhone, formattedDate);
+        const lineSuccess = await sendLinePushAlert(sanitizedText, sanitizedName, sanitizedPhone, formattedDate);
 
         return res.json({ 
             success: true, 
@@ -224,39 +242,51 @@ app.post('/api/feedback', async (req, res) => {
     }
 });
 
-// Endpoint สำหรับ Webhook LINE (รับทั้ง ข้อความ และ ปุ่มกด Postback)
-app.post('/api/webhook', async (req, res) => {
+// Endpoint สำหรับ Webhook LINE
+app.post('/api/webhook', verifyLineSignature, async (req, res) => {
     try {
+        const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN?.trim();
         const events = req.body.events || [];
+
         for (const event of events) {
-            
-            // 1. กรณีแอดมินกดปุ่ม "☑️ ทำการแก้ไขแล้ว" (Postback Event)
             if (event.type === 'postback') {
                 const replyToken = event.replyToken;
-                const postbackData = new URLSearchParams(event.postback.data);
-                const ticketId = postbackData.get('ticket_id');
-                const feedbackText = postbackData.get('feedback_text') || '';
+                
+                let ticketId = null;
+                let feedbackText = '';
 
-                if (replyToken) {
+                try {
+                    const postbackData = new URLSearchParams(event.postback.data);
+                    ticketId = postbackData.get('ticket_id');
+                    feedbackText = postbackData.get('feedback_text') || '';
+                } catch (e) {
+                    console.error('❌ Error parsing postback data:', e.message);
+                }
+
+                if (replyToken && channelToken) {
                     let updateMessage = '';
 
-                    // เช็กว่าเคสนี้ถูกกดแก้ไขไปแล้วหรือยัง
                     if (ticketId && resolvedTickets.has(ticketId)) {
-                        updateMessage = `⚠️ [แจ้งเตือน]\nFeedback นี้ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`;
+                        updateMessage = `⚠ [แจ้งเตือน]\nFeedback นี้ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`;
                     } else {
-                        // บันทึกว่า ticketId นี้จบเคสแล้ว
                         if (ticketId) {
                             resolvedTickets.add(ticketId);
                         }
                         const now = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' });
-                        updateMessage = `✅ [อัปเดตสถานะ]\nFeedback: "${decodeURIComponent(feedbackText)}"\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`;
+                        
+                        let decodedText = feedbackText;
+                        try {
+                            decodedText = decodeURIComponent(feedbackText);
+                        } catch (e) { /* ignore decode error */ }
+
+                        updateMessage = `✅ [อัปเดตสถานะ]\nFeedback: "${decodedText}"\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`;
                     }
 
                     await fetch('https://api.line.me/v2/bot/message/reply', {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`
+                            'Authorization': `Bearer ${channelToken}`
                         },
                         body: JSON.stringify({
                             replyToken: replyToken,
@@ -269,16 +299,16 @@ app.post('/api/webhook', async (req, res) => {
                 }
             }
 
-            // 2. กรณีพิมพ์ดึง Group ID
             if (event.type === 'message' && event.message.type === 'text') {
                 const groupId = event.source.groupId;
                 const replyToken = event.replyToken;
-                if (groupId && replyToken && event.message.text.includes('id')) {
+                
+                if (groupId && replyToken && event.message.text.toLowerCase().trim() === 'id' && channelToken) {
                     await fetch('https://api.line.me/v2/bot/message/reply', {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`
+                            'Authorization': `Bearer ${channelToken}`
                         },
                         body: JSON.stringify({
                             replyToken: replyToken,
@@ -290,6 +320,7 @@ app.post('/api/webhook', async (req, res) => {
         }
         return res.status(200).send('OK');
     } catch (err) {
+        console.error('❌ Webhook Error:', err.message);
         return res.status(200).send('OK');
     }
 });
