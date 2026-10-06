@@ -159,11 +159,11 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate) {
                     {
                         type: "button",
                         action: {
-                            // 💡 ใช้ datetimepicker แทน postback เพื่อไม่ให้แสดงข้อความบน Client อัตโนมัติ
-                            type: "datetimepicker",
+                            // 💡 เปลี่ยนกลับมาใช้ postback + displayText เพื่อให้ข้อความพิมพ์ออกมาจากฝั่งคนกด (ฝั่งขวา)
+                            type: "postback",
                             label: "☑ ทำการแก้ไขแล้ว",
                             data: `action=resolve&ticket_id=${ticketId}`,
-                            mode: "time"
+                            displayText: "รับทราบ/ทำการแก้ไข Feedback เรียบร้อยแล้ว"
                         },
                         style: "primary",
                         color: "#007bff",
@@ -240,9 +240,8 @@ app.post('/api/webhook', verifyLineSignature, async (req, res) => {
         const events = req.body.events || [];
 
         for (const event of events) {
-            // เมื่อมีการกดปุ่ม (รับ Event จาก datetimepicker / postback)
+            // เมื่อมีการกดปุ่ม Flex Message
             if (event.type === 'postback') {
-                const replyToken = event.replyToken;
                 let ticketId = null;
 
                 try {
@@ -253,41 +252,18 @@ app.post('/api/webhook', verifyLineSignature, async (req, res) => {
                 }
 
                 if (ticketId) {
-                    // 🔒 ตรวจสอบว่า Ticket ID นี้ถูกดำเนินการไปแล้วหรือยัง
+                    // ตรวจสอบสถานะว่า Ticket นี้ถูกบันทึกไปแล้วหรือยัง
                     if (resolvedTickets.has(ticketId)) {
-                        // ถ้าเคยแก้ไปแล้ว -> ไม่ต้องทำอะไรเลย (ไม่มีข้อความแจ้งเตือนขึ้น)
+                        console.log(`Ticket ${ticketId} has already been resolved.`);
                         continue;
                     }
 
-                    // บันทึก Ticket ID ไว้ว่าทำรายการแล้ว
+                    // บันทึกสถานะว่าทำรายการแล้ว
                     if (resolvedTickets.size > 3000) resolvedTickets.clear();
                     resolvedTickets.add(ticketId);
 
-                    // สร้างเวลาปัจจุบันเพื่อใส่ในข้อความตอบกลับ
-                    const currentTime = new Date().toLocaleString('th-TH', {
-                        timeZone: 'Asia/Bangkok',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        hour12: false
-                    });
-
-                    // ส่งข้อความแจ้งเตือนเฉพาะในการกดครั้งแรกเท่านั้น
-                    if (replyToken && channelToken) {
-                        await fetch('https://api.line.me/v2/bot/message/reply', {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'Authorization': `Bearer ${channelToken}`
-                            },
-                            body: JSON.stringify({
-                                replyToken: replyToken,
-                                messages: [{
-                                    type: 'text',
-                                    text: `รับทราบ/ทำการแก้ไข Feedback เรียบร้อยแล้ว เมื่อเวลา ${currentTime} น.`
-                                }]
-                            })
-                        });
-                    }
+                    console.log(`✅ Ticket ${ticketId} resolved by user.`);
+                    // 💡 ไม่ต้องมีโค้ดส่ง Reply back ฝั่งบอทอีกต่อไป ข้อความจะส่งขึ้นเฉพาะฝั่งคนกดผ่าน displayText
                 }
             }
 
