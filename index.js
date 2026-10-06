@@ -164,7 +164,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, timeO
                             // 💡 ส่งเฉพาะ action และ ticket_id
                             data: `action=resolve&ticket_id=${ticketId}`,
                             // 💡 แนบเวลาลงใน displayText โดยตรง เพื่อให้พิมพ์ออกมาฝั่งคนกด
-                            displayText: `รับทราบ/ทำการแก้ไข Feedback เรียบร้อยแล้ว (เวลา ${timeOnly} น.)`
+                            displayText: `ทำการแก้ไข Feedback (เวลา ${timeOnly} น.) เรียบร้อยแล้ว`
                         },
                         style: "primary",
                         color: "#007bff",
