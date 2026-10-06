@@ -20,8 +20,8 @@
         button { padding: 12px 20px; background-color: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; width: 100%; font-weight: bold; transition: background 0.2s; }
         button:hover { background-color: #0056b3; }
         button:disabled { background-color: #a0c4ff; cursor: not-allowed; }
-        #result { margin-top: 20px; padding: 15px 20px; border-radius: 6px; background-color: #e9f5ff; border: 1px solid #b8daff; display: none; text-align: center; }
-        .success-title { color: #004085; font-size: 18px; font-weight: bold; margin-bottom: 8px; }
+        #result { margin-top: 20px; padding: 15px 20px; border-radius: 6px; display: none; text-align: center; }
+        .result-title { font-size: 18px; font-weight: bold; margin-bottom: 8px; }
     </style>
 </head>
 <body>
@@ -32,7 +32,6 @@
         <input type="text" id="userName" placeholder="เช่น คุณสมชาย">
     </div>
 
-    <!-- ปรับปรุง Label และ Placeholder ให้เชิญชวนกรอกเบอร์โทร -->
     <div class="form-group">
         <label for="userPhone">
             เบอร์โทรศัพท์ 
@@ -84,25 +83,36 @@
                 
                 const data = await response.json();
                 
-                if (data.error) {
+                // กรณีเกิดข้อผิดพลาดจาก Backend หรือส่ง LINE ไม่สำเร็จ
+                if (data.error || data.line_sent === false) {
                     resultDiv.style.display = 'block';
                     resultDiv.style.backgroundColor = '#f8d7da';
                     resultDiv.style.borderColor = '#f5c6cb';
-                    resultDiv.innerHTML = `<span style="color:#721c24">${data.error}</span>`;
+                    resultDiv.style.border = '1px solid #f5c6cb';
+                    
+                    const errorText = data.error || 'เกิดข้อผิดพลาดในการส่งข้อมูลไปยังระบบLINE กรุณาลองใหม่อีกครั้ง';
+                    
+                    resultDiv.innerHTML = `
+                        <div class="result-title" style="color: #721c24;">เกิดข้อผิดพลาด!</div>
+                        <p style="margin: 0; color: #721c24;">
+                            ${errorText}
+                        </p>
+                    `;
                     return;
                 }
 
-                // แสดงข้อความขอบคุณลูกค้า ( Customer-friendly message )
+                // กรณีส่งสำเร็จเรียบร้อย (กล่องสีเขียว)
                 resultDiv.style.display = 'block';
                 resultDiv.style.backgroundColor = '#d4edda';
                 resultDiv.style.borderColor = '#c3e6cb';
+                resultDiv.style.border = '1px solid #c3e6cb';
                 
                 let contactMsg = phone 
                     ? `หากมีข้อสงสัยเพิ่มเติม เจ้าหน้าที่อาจติดต่อกลับไปยังเบอร์ <strong>${phone}</strong> ครับ`
                     : 'ขอบคุณสำหรับทุกข้อเสนอแนะเพื่อนำไปปรับปรุงการบริการครับ';
 
                 resultDiv.innerHTML = `
-                    <div class="success-title">ส่งข้อมูลเรียบร้อยแล้ว!</div>
+                    <div class="result-title" style="color: #004085;">ส่งข้อมูลเรียบร้อยแล้ว!</div>
                     <p style="margin: 0; color: #155724;">
                         ขอบคุณสำหรับ Feedback ของคุณ${name ? ' ' + name : ''} <br>
                         <small style="color: #155724;">${contactMsg}</small>
@@ -113,10 +123,18 @@
                 document.getElementById('inputText').value = '';
 
             } catch (err) {
+                // กรณี Network Error / Catch Error (กล่องสีแดง)
                 resultDiv.style.display = 'block';
                 resultDiv.style.backgroundColor = '#f8d7da';
                 resultDiv.style.borderColor = '#f5c6cb';
-                resultDiv.innerHTML = '<span style="color:#721c24">เกิดข้อผิดพลาดในการเชื่อมต่อ กรุณาลองใหม่อีกครั้ง</span>';
+                resultDiv.style.border = '1px solid #f5c6cb';
+                
+                resultDiv.innerHTML = `
+                    <div class="result-title" style="color: #721c24;">เกิดข้อผิดพลาด!</div>
+                    <p style="margin: 0; color: #721c24;">
+                        ไม่สามารถเชื่อมต่อระบบได้ กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองใหม่อีกครั้ง
+                    </p>
+                `;
             } finally {
                 // คืนค่าปุ่มส่งข้อความ
                 btn.disabled = false;
