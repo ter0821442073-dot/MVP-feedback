@@ -25,19 +25,30 @@ app.use(express.json({
 // In-Memory State สำหรับจดจำสถานะ Ticket (ป้องกันการกดซ้ำ)
 const resolvedTickets = new Set();
 
+/**
+ * ฟังก์ชันดึงปี ค.ศ. ตามเวลาประเทศไทย (Asia/Bangkok)
+ */
+function getBangkokYear() {
+    const bangkokDateStr = new Date().toLocaleString('en-US', { timeZone: 'Asia/Bangkok' });
+    return new Date(bangkokDateStr).getFullYear();
+}
+
 // 🔢 ระบบนับลำดับและรีเซ็ตทุกปี (In-Memory State)
-let currentYear = new Date().getFullYear();
+let currentYear = getBangkokYear();
 let ticketCounter = 0;
 
 /**
- * ฟังก์ชันดึงเลขลำดับประจำปี (จะรีเซ็ตเป็น 1 เมื่อเปลี่ยนปีใหม่)
+ * ฟังก์ชันดึงเลขลำดับประจำปี (จะรีเซ็ตเป็น 1 เมื่อเข้าสู่ปีใหม่)
  */
 function getNextTicketNumber() {
-    const nowYear = new Date().getFullYear();
+    const nowYear = getBangkokYear();
+
+    // ถ้าปีปัจจุบันไม่ตรงกับปีที่บันทึกไว้ ให้รีเซ็ตตัวนับกลับเป็น 0
     if (nowYear !== currentYear) {
         currentYear = nowYear;
-        ticketCounter = 0; // รีเซ็ตตัวนับกลับเป็น 0 เมื่อเข้าสู่ปีใหม่
+        ticketCounter = 0; 
     }
+
     ticketCounter += 1;
     return ticketCounter;
 }
@@ -100,7 +111,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, timeO
 
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
     
-    // ดึงลำดับเลขประจำปี (เช่น 1, 2, 3, ...)
+    // ดึงลำดับเลขประจำปี (เพิ่มขึ้นทีละ 1 และรีเซ็ตเมื่อเข้าปีใหม่)
     const ticketSeqNumber = getNextTicketNumber();
     
     // สุ่มสร้าง Ticket ID สำหรับ Postback
@@ -197,9 +208,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, timeO
                         action: {
                             type: "postback",
                             label: "☑ ทำการแก้ไขแล้ว",
-                            // 💡 ส่งเฉพาะ action และ ticket_id
                             data: `action=resolve&ticket_id=${ticketId}`,
-                            // 💡 แนบเวลาลงใน displayText โดยตรง เพื่อให้พิมพ์ออกมาฝั่งคนกด
                             displayText: `ทำการแก้ไข Feedback เมื่อเวลา ${timeOnly} น. เรียบร้อยแล้ว`
                         },
                         style: "primary",
@@ -305,7 +314,6 @@ app.post('/api/webhook', verifyLineSignature, async (req, res) => {
 
                     console.log(`✅ บันทึกการแก้ไข Ticket ID: ${ticketId} สำเร็จ`);
                 }
-                // 💡 ไม่ส่ง Reply Message ตอบกลับ เพื่อไม่ให้มีข้อความจาก Bot เด้งซ้ำ
             }
 
             // คำสั่งพิมพ์ 'id' เพื่อเช็ก Group ID
