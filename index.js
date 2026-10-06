@@ -56,13 +56,12 @@ function loadCounterData() {
 }
 
 /**
- * ฟังก์ชันดึงเลขลำดับประจำปี (รีเซ็ตเป็น 1 เมื่อเปลี่ยนปีใหม่ และบันทึกลงไฟล์)
+ * ฟังก์ชันดึงเลขลำดับประจำปี (รีเซ็ตเป็น 1 เมื่อเริ่มปีใหม่)
  */
 function getNextTicketNumber() {
     const nowYear = getBangkokYear();
     let counterData = loadCounterData();
 
-    // เช็กว่าเข้าสู่ปีใหม่แล้วหรือยัง
     if (counterData.year !== nowYear) {
         counterData.year = nowYear;
         counterData.count = 0; // รีเซ็ตเมื่อเริ่มปีใหม่
@@ -70,7 +69,6 @@ function getNextTicketNumber() {
 
     counterData.count += 1; // เพิ่มทีละ 1
 
-    // บันทึกค่าล่าสุดกลับลงไฟล์ JSON
     try {
         fs.writeFileSync(COUNTER_FILE_PATH, JSON.stringify(counterData, null, 2), 'utf8');
     } catch (err) {
@@ -128,7 +126,7 @@ function verifyLineSignature(req, res, next) {
 /**
  * ฟังก์ชันส่ง LINE Push Alert ด้วย Flex Message
  */
-async function sendLinePushAlert(customerText, name, phone, formattedDate, timeOnly) {
+async function sendLinePushAlert(customerText, name, phone, formattedDate) {
     const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN?.trim();
     const targetId = process.env.LINE_TARGET_ID?.trim();
 
@@ -139,7 +137,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, timeO
 
     const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
     
-    // ดึงลำดับเลขประจำปี (รันเพิ่มทีละ 1 ถาวร และรีเซ็ตอัตโนมัติเมื่อเข้าปีใหม่)
+    // ดึงลำดับเลขประจำปี
     const ticketSeqNumber = getNextTicketNumber();
     
     // สุ่มสร้าง Ticket ID สำหรับ Postback
@@ -237,6 +235,7 @@ async function sendLinePushAlert(customerText, name, phone, formattedDate, timeO
                             type: "postback",
                             label: "☑ ทำการแก้ไขแล้ว",
                             data: `action=resolve&ticket_id=${ticketId}`,
+                            // ✏️ ปรับปรุง: เปลี่ยนข้อความตอบกลับเป็นเลขบิล #ticketSeqNumber
                             displayText: `ทำการแก้ไข Feedback #${ticketSeqNumber} เรียบร้อยแล้ว`
                         },
                         style: "primary",
@@ -295,12 +294,7 @@ app.post('/api/feedback', async (req, res) => {
             hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
         }) + ' น.';
 
-        const timeOnly = now.toLocaleString('th-TH', {
-            timeZone: 'Asia/Bangkok',
-            hour: '2-digit', minute: '2-digit', hour12: false
-        });
-
-        const lineSuccess = await sendLinePushAlert(sanitizedText, sanitizedName, sanitizedPhone, formattedDate, timeOnly);
+        const lineSuccess = await sendLinePushAlert(sanitizedText, sanitizedName, sanitizedPhone, formattedDate);
 
         return res.json({ 
             success: true, 
@@ -333,7 +327,7 @@ app.post('/api/webhook', verifyLineSignature, async (req, res) => {
                 if (ticketId) {
                     // 🔒 ตรวจสอบว่า Ticket นี้ถูกบันทึกไปแล้วหรือยัง (ป้องกันการล็อกประมวลผลซ้ำ)
                     if (resolvedTickets.has(ticketId)) {
-                        console.log(`⚠️ Ticket ID: ${ticketId} ถูกแก้ไขไปแล้ว (ข้ามการประมวลผล)`);
+                        console.log(`⚠️️ Ticket ID: ${ticketId} ถูกแก้ไขไปแล้ว (ข้ามการประมวลผล)`);
                         continue;
                     }
 
