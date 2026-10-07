@@ -1,1 +1,13 @@
+# Dependencies (สำคัญมาก! ห้าม push ขึ้น git)
+node_modules/
+
+# Environment Variables
 .env
+.env.local
+.env*.local
+
+# Vercel CLI Config
+.vercel
+
+# Logs
+npm-debug.log*
