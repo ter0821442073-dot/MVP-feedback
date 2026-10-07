@@ -28,7 +28,8 @@ const CONFIG = {
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PHONE_REGEX = /^[0-9+\-()\s]{6,20}$/;
 
-const env = (name) => process.env[name]?.trim() || '';
+// ตัดช่องว่างและเครื่องหมาย " หรือ ' ที่ครอบค่า (มักติดมาตอนก๊อปจาก .env ไปวางใน Vercel/Render)
+const env = (name) => (process.env[name] ?? '').trim().replace(/^(["'])(.*)\1$/s, '$2').trim();
 
 // เตือนตั้งแต่เริ่มระบบ ถ้าตั้งค่าไม่ครบ
 (function checkEnvOnStartup() {
