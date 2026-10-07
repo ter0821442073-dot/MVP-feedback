@@ -116,6 +116,7 @@ const memory = {
     resolved: new Set(),
     counterYear: null,
     counter: 0,
+    lastLine: null, // { seq, ticketId, at } ของ Ticket ล่าสุดที่ส่งเข้า LINE สำเร็จ
     rate: new Map(), // key -> { count, resetAt }
 };
 
@@ -190,6 +191,50 @@ async function getNextTicketNumber() {
     }
     memory.counter += 1;
     return memory.counter;
+}
+
+/**
+ * คืนเลข Ticket ที่เพิ่งออกให้ (ใช้เมื่อส่งไม่สำเร็จเลย เพื่อไม่ให้เลขข้าม)
+ * ลดเลขลงเฉพาะเมื่อเลขล่าสุดยังเป็นเลขของเราเท่านั้น (กันไปลบเลขของคำขออื่น)
+ */
+async function releaseTicketNumber(seq) {
+    const year = getBangkokYear();
+    try {
+        if (redisEnabled()) {
+            const lua = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DECR', KEYS[1]) end return nil";
+            await redisCommand(['EVAL', lua, 1, `feedback:ticket_counter:${year}`, String(seq)]);
+            return;
+        }
+        if (memory.counterYear === year && memory.counter === seq) memory.counter -= 1;
+    } catch (err) {
+        console.error('⚠️ releaseTicketNumber failed (ignored):', err.message);
+    }
+}
+
+/**
+ * จำ Ticket ล่าสุดที่ส่งเข้า LINE สำเร็จ (ใช้อ้างอิงตอนต้องสลับไปแจ้งเตือนทาง Telegram)
+ */
+async function rememberLineTicket(seq, ticketId) {
+    const record = { seq, ticketId, at: Date.now() };
+    memory.lastLine = record;
+    if (!redisEnabled()) return;
+    try {
+        await redisCommand(['SET', `feedback:last_line:${getBangkokYear()}`, JSON.stringify(record), 'EX', 60 * 60 * 24 * 800]);
+    } catch (err) {
+        console.error('⚠️ rememberLineTicket failed (ignored):', err.message);
+    }
+}
+
+async function getLastLineTicket() {
+    if (redisEnabled()) {
+        try {
+            const raw = await redisCommand(['GET', `feedback:last_line:${getBangkokYear()}`]);
+            if (raw) return JSON.parse(raw);
+        } catch (err) {
+            console.error('⚠️ getLastLineTicket failed (fallback to memory):', err.message);
+        }
+    }
+    return memory.lastLine;
 }
 
 /**
@@ -511,7 +556,7 @@ async function sendLinePushAlert(payloadData) {
  * ส่งแจ้งเตือนสำรองไป Telegram (ใช้เฉพาะเมื่อโควต้าข้อความรายเดือนของ LINE หมดเท่านั้น)
  * ต้องตั้ง TELEGRAM_BOT_TOKEN และ TELEGRAM_CHAT_ID
  */
-async function sendTelegramAlert({ customerText, name, phone, formattedDate, ticketSeqNumber }) {
+async function sendTelegramAlert({ customerText, name, phone, formattedDate, ticketSeqNumber, lastLineTicket }) {
     const token = env('TELEGRAM_BOT_TOKEN');
     const chatId = env('TELEGRAM_CHAT_ID');
     if (!token || !chatId) {
@@ -519,8 +564,21 @@ async function sendTelegramAlert({ customerText, name, phone, formattedDate, tic
         return false;
     }
 
+    // อ้างอิง Ticket ล่าสุดที่ส่งเข้า LINE สำเร็จ ก่อนโควต้าจะเต็ม
+    let lineRef = '↩️ ต่อจาก LINE ล่าสุด: (ยังไม่มีประวัติ)';
+    if (lastLineTicket?.seq) {
+        const lastTime = new Intl.DateTimeFormat('th-TH', {
+            timeZone: 'Asia/Bangkok',
+            day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false
+        }).format(new Date(lastLineTicket.at)) + ' น.';
+        lineRef = `↩️ ต่อจาก LINE ล่าสุด: #${lastLineTicket.seq} (${lastLineTicket.ticketId?.slice(0, 8) || '-'} • ${lastLineTicket.at ? lastTime : '-'})`;
+    }
+
     const text = [
-        `📢 Feedback ใหม่ #${ticketSeqNumber} (ส่งผ่าน Telegram เพราะ LINE ส่งไม่ได้)`,
+        `📢 Feedback ใหม่ #${ticketSeqNumber}`,
+        '⚠️ ส่งผ่าน Telegram เพราะโควต้า LINE รายเดือนเต็ม',
+        lineRef,
+        '',
         `👤 ผู้ส่ง: ${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`,
         `📅 เวลา: ${formattedDate}`,
         '',
@@ -695,12 +753,15 @@ app.post(
             // 1) ส่งเข้า LINE ก่อนเสมอ
             const lineResult = await sendLinePushAlert(alertData);
             if (lineResult.ok) {
+                await rememberLineTicket(ticketSeqNumber, ticketId); // จำไว้เป็นอ้างอิงสำหรับ Telegram
                 return res.json({ success: true, line_sent: true, delivered_via: 'line' });
             }
 
             // 2) ส่งไป Telegram เฉพาะเมื่อโควต้า LINE รายเดือนหมดเท่านั้น
+            //    ใช้เลข Ticket เดียวกัน จึงต่อเนื่องจาก Ticket ล่าสุดที่ส่งเข้า LINE สำเร็จ
             if (lineResult.quotaExceeded) {
-                const telegramOk = await sendTelegramAlert(alertData);
+                const lastLineTicket = await getLastLineTicket();
+                const telegramOk = await sendTelegramAlert({ ...alertData, lastLineTicket });
                 if (telegramOk) {
                     // ตอบสำเร็จเหมือนปกติ ลูกค้าไม่เห็นข้อผิดพลาด
                     // (line_sent: true เพื่อให้หน้าเว็บเดิมที่ตรวจ field นี้ไม่แสดง error; ช่องทางจริงดูที่ delivered_via)
@@ -708,7 +769,8 @@ app.post(
                 }
             }
 
-            // 3) ส่งไม่สำเร็จทั้งหมด: แจ้งผู้ใช้ตามจริง เพื่อให้กดส่งใหม่ได้
+            // 3) ส่งไม่สำเร็จเลย: คืนเลข Ticket เพื่อไม่ให้เลขข้าม แล้วแจ้งผู้ใช้ให้กดส่งใหม่
+            await releaseTicketNumber(ticketSeqNumber);
             return res.status(502).json({
                 success: false,
                 line_sent: false,
