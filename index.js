@@ -488,6 +488,13 @@ async function sendLinePushAlert(payloadData) {
             const errBody = (await response.text()).slice(0, 500);
             console.error(`❌ LINE API Rejected Push (HTTP ${response.status}):`, errBody);
 
+            // โควต้าข้อความรายเดือนหมด: retry ไม่มีประโยชน์ (และเปลืองเวลา) ให้หยุดทันที
+            const isMonthlyLimit = response.status === 429 && /monthly limit/i.test(errBody);
+            if (isMonthlyLimit) {
+                console.error('🚫 LINE monthly message quota reached — will not retry');
+                return false;
+            }
+
             // Error ฝั่งผู้ใช้ (4xx ยกเว้น 429) ไม่ต้อง retry
             if (response.status < 500 && response.status !== 429) return false;
         } catch (err) {
@@ -499,9 +506,59 @@ async function sendLinePushAlert(payloadData) {
     return false;
 }
 
+/**
+ * ส่งแจ้งเตือนสำรองไป Telegram (ใช้เมื่อ LINE ส่งไม่สำเร็จ เช่น โควต้ารายเดือนหมด)
+ * ต้องตั้ง TELEGRAM_BOT_TOKEN และ TELEGRAM_CHAT_ID
+ */
+async function sendTelegramAlert({ customerText, name, phone, formattedDate, ticketSeqNumber }) {
+    const token = env('TELEGRAM_BOT_TOKEN');
+    const chatId = env('TELEGRAM_CHAT_ID');
+    if (!token || !chatId) {
+        console.warn('⚠️ Telegram fallback not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)');
+        return false;
+    }
+
+    const text = [
+        `📢 Feedback ใหม่ #${ticketSeqNumber} (ส่งผ่าน Telegram เพราะ LINE ส่งไม่ได้)`,
+        `👤 ผู้ส่ง: ${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`,
+        `📅 เวลา: ${formattedDate}`,
+        '',
+        `💬 ข้อความ:\n${customerText}`
+    ].join('\n');
+
+    try {
+        // ไม่ใช้ parse_mode เพื่อให้ข้อความลูกค้าแสดงตามจริง ไม่ถูกตีความเป็น Markdown/HTML
+        const response = await fetchWithTimeout(`https://api.telegram.org/bot${token}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true })
+        });
+        if (!response.ok) {
+            // ไม่ log URL เพราะมี bot token อยู่ในนั้น
+            console.error(`❌ Telegram sendMessage failed (HTTP ${response.status}):`, (await response.text()).slice(0, 300));
+            return false;
+        }
+        return true;
+    } catch (err) {
+        console.error('❌ Network Error while sending Telegram alert:', err.message);
+        return false;
+    }
+}
+
+/**
+ * ตอบกลับด้วย replyToken (ใช้ได้ครั้งเดียว อายุสั้น)
+ * @returns {Promise<boolean>} true = ส่งสำเร็จ
+ */
 async function sendLineReply(replyToken, text) {
     const channelToken = env('LINE_CHANNEL_ACCESS_TOKEN');
-    if (!channelToken || !replyToken) return;
+    if (!channelToken) {
+        console.error('❌ LINE_CHANNEL_ACCESS_TOKEN is not set — cannot reply');
+        return false;
+    }
+    if (!replyToken) {
+        console.error('❌ No replyToken in event — cannot reply');
+        return false;
+    }
 
     try {
         const response = await fetchWithTimeout('https://api.line.me/v2/bot/message/reply', {
@@ -514,10 +571,52 @@ async function sendLineReply(replyToken, text) {
         });
         if (!response.ok) {
             console.error(`❌ LINE Reply failed (HTTP ${response.status}):`, (await response.text()).slice(0, 500));
+            return false;
         }
+        return true;
     } catch (err) {
         console.error('❌ Network Error while sending LINE reply:', err.message);
+        return false;
     }
+}
+
+/**
+ * ส่งข้อความแบบ Push ไปยังห้อง/กลุ่ม/ผู้ใช้ (ใช้เป็นตัวสำรองเมื่อ reply ล้มเหลว)
+ */
+async function sendLinePushText(to, text) {
+    const channelToken = env('LINE_CHANNEL_ACCESS_TOKEN');
+    if (!channelToken || !to) return false;
+
+    try {
+        const response = await fetchWithTimeout('https://api.line.me/v2/bot/message/push', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${channelToken}`
+            },
+            body: JSON.stringify({ to, messages: [{ type: 'text', text }] })
+        });
+        if (!response.ok) {
+            console.error(`❌ LINE Push (text) failed (HTTP ${response.status}):`, (await response.text()).slice(0, 500));
+            return false;
+        }
+        return true;
+    } catch (err) {
+        console.error('❌ Network Error while sending LINE push text:', err.message);
+        return false;
+    }
+}
+
+/**
+ * พยายามตอบด้วย reply ก่อน ถ้าไม่สำเร็จ (เช่น token หมดอายุ) ให้ push เข้าห้องเดิมแทน
+ */
+async function replyOrPush(event, text) {
+    const replied = await sendLineReply(event.replyToken, text);
+    if (replied) return true;
+
+    const to = event.source?.groupId || event.source?.roomId || event.source?.userId;
+    console.warn('⚠️ Reply failed — falling back to push message');
+    return sendLinePushText(to, text);
 }
 
 // ---------------------------------------------------------------------------
@@ -583,17 +682,25 @@ app.post(
             }
             const ticketId = crypto.randomUUID();
 
-            const lineSuccess = await sendLinePushAlert({
+            const alertData = {
                 customerText: cleanText,
                 name: cleanName,
                 phone: cleanPhone,
                 formattedDate,
                 ticketSeqNumber,
                 ticketId
-            });
+            };
 
+            const lineSuccess = await sendLinePushAlert(alertData);
+
+            // LINE ล้มเหลว (เช่น โควต้าหมด) → ส่งสำรองไป Telegram เพื่อไม่ให้ Feedback หาย
+            let telegramSuccess = false;
             if (!lineSuccess) {
-                // แจ้งผู้ใช้ตามจริงว่าไม่สำเร็จ เพื่อให้กดส่งใหม่ได้ ไม่ใช่ตอบว่าสำเร็จทั้งที่ข้อความหาย
+                telegramSuccess = await sendTelegramAlert(alertData);
+            }
+
+            if (!lineSuccess && !telegramSuccess) {
+                // ไม่มีช่องทางไหนส่งสำเร็จ: แจ้งผู้ใช้ตามจริง เพื่อให้กดส่งใหม่ได้
                 return res.status(502).json({
                     success: false,
                     line_sent: false,
@@ -601,7 +708,7 @@ app.post(
                 });
             }
 
-            return res.json({ success: true, line_sent: true });
+            return res.json({ success: true, line_sent: lineSuccess, telegram_sent: telegramSuccess });
         } catch (error) {
             console.error('❌ Error inside /api/feedback:', error.message);
             return res.status(500).json({ error: 'เกิดข้อผิดพลาดภายในระบบ' });
@@ -617,8 +724,11 @@ async function handlePostback(event) {
 
     // 🔒 รับเฉพาะ Postback ที่มาจากกลุ่ม/ห้องเป้าหมายของระบบเท่านั้น
     const sourceId = event.source?.groupId || event.source?.roomId || event.source?.userId;
+    console.log(`📥 Postback received (source=${event.source?.type}, id=${sourceId}, hasReplyToken=${Boolean(event.replyToken)})`);
+
     if (targetId && sourceId !== targetId) {
-        console.warn('⚠️ Ignored postback from non-target source');
+        // ถ้าเจอบรรทัดนี้ใน log แปลว่า LINE_TARGET_ID ไม่ตรงกับห้องที่กดปุ่ม → บอทจึงเงียบ
+        console.warn(`⚠️ Ignored postback from non-target source. sourceId=${sourceId} / LINE_TARGET_ID=${targetId}`);
         return;
     }
 
@@ -643,18 +753,19 @@ async function handlePostback(event) {
 
     if (!isFirstResolve) {
         console.log(`⚠️ Ticket ID: ${ticketId} ถูกแก้ไขไปแล้ว (ข้ามการประมวลผล)`);
-        await sendLineReply(
-            event.replyToken,
+        await replyOrPush(
+            event,
             `⚠️ [แจ้งเตือน]\nFeedback ${ticketLabel} ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`
         );
         return;
     }
 
     console.log(`✅ บันทึกการแก้ไข Ticket ID: ${ticketId} (${ticketLabel}) สำเร็จ`);
-    await sendLineReply(
-        event.replyToken,
+    const sent = await replyOrPush(
+        event,
         `✅ [อัปเดตสถานะ]\nFeedback ${ticketLabel} ได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${getBangkokTimeLabel()}`
     );
+    if (!sent) console.error(`❌ Could not send resolve confirmation for ${ticketLabel}`);
 }
 
 async function handleTextMessage(event) {
@@ -678,6 +789,7 @@ app.post(
     verifyLineSignature,
     async (req, res) => {
         const events = Array.isArray(req.body?.events) ? req.body.events : [];
+        console.log(`📨 Webhook received ${events.length} event(s): ${events.map((e) => e.type).join(', ') || '-'}`);
 
         for (const event of events) {
             try {
