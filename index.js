@@ -35,6 +35,9 @@ const env = (name) => process.env[name]?.trim() || '';
     if (!env('LINE_CHANNEL_SECRET')) console.error('❌ LINE_CHANNEL_SECRET is not set — /api/webhook will reject all requests');
     if (!env('LINE_CHANNEL_ACCESS_TOKEN')) console.error('❌ LINE_CHANNEL_ACCESS_TOKEN is not set');
     if (!env('LINE_TARGET_ID')) console.warn('⚠️ LINE_TARGET_ID is not set — feedback cannot be pushed (คำสั่ง "id" ในกลุ่มยังใช้ได้)');
+    if (env('TELEGRAM_BOT_TOKEN') && !env('TELEGRAM_WEBHOOK_SECRET')) {
+        console.warn('⚠️ TELEGRAM_WEBHOOK_SECRET is not set — /api/telegram-webhook will reject all requests (ปุ่ม "ทำการแก้ไขแล้ว" ใน Telegram จะไม่ทำงาน)');
+    }
     if (!env('UPSTASH_REDIS_REST_URL') || !env('UPSTASH_REDIS_REST_TOKEN')) {
         console.warn('⚠️ Redis is not configured — ใช้ in-memory แทน (เลขลำดับ/สถานะ ticket/rate limit จะหายเมื่อ restart และไม่ทำงานข้าม instance)');
     }
@@ -79,6 +82,13 @@ function fetchWithTimeout(url, options = {}, timeoutMs = CONFIG.fetchTimeoutMs) 
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// เทียบสตริงแบบ timing-safe
+function safeEqual(a, b) {
+    const bufA = Buffer.from(String(a));
+    const bufB = Buffer.from(String(b));
+    return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
+}
 
 // ---------------------------------------------------------------------------
 // 🗄️ Storage Layer: Redis (Upstash REST) พร้อม fallback เป็น In-Memory
@@ -339,6 +349,16 @@ function cleanTextInput(input) {
 }
 
 /**
+ * Escape ข้อความก่อนใส่ใน Telegram parse_mode=HTML (กันข้อความลูกค้าถูกตีความเป็นแท็ก)
+ */
+function escapeHtml(str) {
+    return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+/**
  * ตรวจสอบ Cloudflare Turnstile (เปิดใช้เมื่อกำหนด TURNSTILE_SECRET_KEY)
  */
 async function verifyTurnstile(token, ip) {
@@ -552,56 +572,99 @@ async function sendLinePushAlert(payloadData) {
     return { ok: false, quotaExceeded: false };
 }
 
+// ---------------------------------------------------------------------------
+// ✈️ Telegram helpers
+// ---------------------------------------------------------------------------
+
 /**
- * ส่งแจ้งเตือนสำรองไป Telegram (ใช้เฉพาะเมื่อโควต้าข้อความรายเดือนของ LINE หมดเท่านั้น)
- * ต้องตั้ง TELEGRAM_BOT_TOKEN และ TELEGRAM_CHAT_ID
+ * เรียก Telegram Bot API (ไม่ log URL เพราะมี bot token อยู่ในนั้น)
+ * @returns {Promise<{ok: boolean, result?: any}>}
  */
-async function sendTelegramAlert({ customerText, name, phone, formattedDate, ticketSeqNumber, lastLineTicket }) {
+async function telegramApi(method, payload) {
     const token = env('TELEGRAM_BOT_TOKEN');
-    const chatId = env('TELEGRAM_CHAT_ID');
-    if (!token || !chatId) {
-        console.warn('⚠️ Telegram fallback not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)');
-        return false;
+    if (!token) return { ok: false };
+
+    try {
+        const response = await fetchWithTimeout(`https://api.telegram.org/bot${token}/${method}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        if (!response.ok) {
+            console.error(`❌ Telegram ${method} failed (HTTP ${response.status}):`, (await response.text()).slice(0, 300));
+            return { ok: false };
+        }
+        const data = await response.json();
+        return { ok: data.ok === true, result: data.result };
+    } catch (err) {
+        console.error(`❌ Network Error while calling Telegram ${method}:`, err.message);
+        return { ok: false };
     }
+}
+
+/**
+ * สร้างข้อความ Telegram ให้หน้าตาเหมือน Flex Message ใน LINE
+ * (หัวข้อ + เลข Ticket / ผู้ส่ง / เวลา / กล่องข้อความ / ปุ่ม "ทำการแก้ไขแล้ว")
+ */
+function buildTelegramMessage({ customerText, name, phone, formattedDate, ticketSeqNumber, ticketId, lastLineTicket }) {
+    const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
 
     // อ้างอิง Ticket ล่าสุดที่ส่งเข้า LINE สำเร็จ ก่อนโควต้าจะเต็ม
-    let lineRef = '↩️ ต่อจาก LINE ล่าสุด: (ยังไม่มีประวัติ)';
+    let lineRef = '(ยังไม่มีประวัติ)';
     if (lastLineTicket?.seq) {
         const lastTime = new Intl.DateTimeFormat('th-TH', {
             timeZone: 'Asia/Bangkok',
             day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false
         }).format(new Date(lastLineTicket.at)) + ' น.';
-        lineRef = `↩️ ต่อจาก LINE ล่าสุด: #${lastLineTicket.seq} (${lastLineTicket.ticketId?.slice(0, 8) || '-'} • ${lastLineTicket.at ? lastTime : '-'})`;
+        lineRef = `#${lastLineTicket.seq} (${lastLineTicket.ticketId?.slice(0, 8) || '-'} • ${lastLineTicket.at ? lastTime : '-'})`;
     }
+
+    const divider = '━━━━━━━━━━━━━━━━';
 
     const text = [
-        `📢 Feedback ใหม่ #${ticketSeqNumber}`,
-        '⚠️ ส่งผ่าน Telegram เพราะโควต้า LINE รายเดือนเต็ม',
-        lineRef,
-        '',
-        `👤 ผู้ส่ง: ${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`,
-        `📅 เวลา: ${formattedDate}`,
-        '',
-        `💬 ข้อความ:\n${customerText}`
+        `📢 <b>แจ้งเตือน Feedback</b>   <b>#${ticketSeqNumber}</b>`,
+        '<i>Cinema • สาขากาฬสินธุ์</i>',
+        divider,
+        `👤 <b>ผู้ส่ง:</b> ${escapeHtml(customerInfo)}`,
+        `📅 <b>เวลา:</b> ${escapeHtml(formattedDate)}`,
+        divider,
+        '💬 <b>ข้อความที่ได้รับ:</b>',
+        `<blockquote>${escapeHtml(customerText)}</blockquote>`,
+        divider,
+        `⚠️ <i>ส่งผ่าน Telegram เพราะโควต้า LINE รายเดือนเต็ม</i>`,
+        `↩️ <i>ต่อจาก LINE ล่าสุด: ${escapeHtml(lineRef)}</i>`
     ].join('\n');
 
-    try {
-        // ไม่ใช้ parse_mode เพื่อให้ข้อความลูกค้าแสดงตามจริง ไม่ถูกตีความเป็น Markdown/HTML
-        const response = await fetchWithTimeout(`https://api.telegram.org/bot${token}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true })
-        });
-        if (!response.ok) {
-            // ไม่ log URL เพราะมี bot token อยู่ในนั้น
-            console.error(`❌ Telegram sendMessage failed (HTTP ${response.status}):`, (await response.text()).slice(0, 300));
-            return false;
-        }
-        return true;
-    } catch (err) {
-        console.error('❌ Network Error while sending Telegram alert:', err.message);
+    // callback_data จำกัด 64 ไบต์: "r|<uuid 36>|<seq>" ยาวไม่เกิน ~50
+    const reply_markup = {
+        inline_keyboard: [[
+            { text: '☑ ทำการแก้ไขแล้ว', callback_data: `r|${ticketId}|${ticketSeqNumber}` }
+        ]]
+    };
+
+    return { text, reply_markup };
+}
+
+/**
+ * ส่งแจ้งเตือนสำรองไป Telegram (ใช้เฉพาะเมื่อโควต้าข้อความรายเดือนของ LINE หมดเท่านั้น)
+ * ต้องตั้ง TELEGRAM_BOT_TOKEN และ TELEGRAM_CHAT_ID
+ */
+async function sendTelegramAlert(alertData) {
+    const chatId = env('TELEGRAM_CHAT_ID');
+    if (!env('TELEGRAM_BOT_TOKEN') || !chatId) {
+        console.warn('⚠️ Telegram fallback not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)');
         return false;
     }
+
+    const { text, reply_markup } = buildTelegramMessage(alertData);
+    const result = await telegramApi('sendMessage', {
+        chat_id: chatId,
+        text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup
+    });
+    return result.ok;
 }
 
 /**
@@ -872,6 +935,116 @@ app.post(
         }
 
         // ตอบ 200 เสมอ เพื่อไม่ให้ LINE ส่ง event เดิมซ้ำ
+        return res.status(200).send('OK');
+    }
+);
+
+// ---------------------------------------------------------------------------
+// 🤖 Endpoint: Telegram Webhook (รับการกดปุ่ม "ทำการแก้ไขแล้ว")
+// ---------------------------------------------------------------------------
+function verifyTelegramSecret(req, res, next) {
+    const secret = env('TELEGRAM_WEBHOOK_SECRET');
+
+    // 🔒 Fail-closed: ถ้าไม่ได้ตั้งค่า Secret ต้องปฏิเสธ
+    if (!secret) {
+        console.error('❌ TELEGRAM_WEBHOOK_SECRET is not set. Rejecting Telegram webhook request.');
+        return res.status(500).send('Server misconfigured');
+    }
+
+    const header = req.headers['x-telegram-bot-api-secret-token'];
+    if (typeof header !== 'string' || !safeEqual(header, secret)) {
+        console.error('❌ Invalid Telegram webhook secret');
+        return res.status(403).send('Forbidden');
+    }
+    next();
+}
+
+async function handleTelegramCallback(query) {
+    const allowedChatId = env('TELEGRAM_CHAT_ID');
+    const chatId = query.message?.chat?.id;
+    const messageId = query.message?.message_id;
+
+    // 🔒 รับเฉพาะการกดปุ่มที่มาจากแชต/กลุ่มเป้าหมายของระบบเท่านั้น
+    if (!allowedChatId || String(chatId) !== allowedChatId) {
+        console.warn(`⚠️ Ignored Telegram callback from non-target chat. chatId=${chatId}`);
+        await telegramApi('answerCallbackQuery', { callback_query_id: query.id });
+        return;
+    }
+
+    const data = typeof query.data === 'string' ? query.data : '';
+
+    // ปุ่มที่แก้ไขแล้ว (กดซ้ำไม่ต้องทำอะไร)
+    if (data === 'noop') {
+        await telegramApi('answerCallbackQuery', { callback_query_id: query.id, text: 'Feedback นี้แก้ไขเรียบร้อยแล้ว' });
+        return;
+    }
+
+    const [action, ticketId, seq] = data.split('|');
+    if (action !== 'r' || !ticketId || !UUID_REGEX.test(ticketId)) {
+        await telegramApi('answerCallbackQuery', { callback_query_id: query.id });
+        return;
+    }
+
+    const ticketLabel = seq && /^\d{1,10}$/.test(seq) ? `#${seq}` : ticketId.slice(0, 8);
+    const doneTime = getBangkokTimeLabel();
+    const doneMarkup = {
+        inline_keyboard: [[{ text: `✅ แก้ไขแล้ว • ${doneTime}`, callback_data: 'noop' }]]
+    };
+
+    const isFirstResolve = await markTicketResolved(ticketId);
+
+    if (!isFirstResolve) {
+        console.log(`⚠️ Ticket ID: ${ticketId} ถูกแก้ไขไปแล้ว (Telegram)`);
+        await telegramApi('answerCallbackQuery', {
+            callback_query_id: query.id,
+            text: `Feedback ${ticketLabel} ได้รับการแก้ไขไปแล้วก่อนหน้านี้`,
+            show_alert: true
+        });
+        // ทำให้ปุ่มบนข้อความเป็นสถานะแก้ไขแล้ว เผื่อยังค้างเป็นปุ่มเดิม
+        await telegramApi('editMessageReplyMarkup', {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: { inline_keyboard: [[{ text: '✅ แก้ไขแล้ว', callback_data: 'noop' }]] }
+        });
+        return;
+    }
+
+    console.log(`✅ บันทึกการแก้ไข Ticket ID: ${ticketId} (${ticketLabel}) สำเร็จ (Telegram)`);
+
+    await telegramApi('answerCallbackQuery', {
+        callback_query_id: query.id,
+        text: `บันทึกการแก้ไข Feedback ${ticketLabel} แล้ว`
+    });
+
+    // เปลี่ยนปุ่มเดิมเป็นสถานะ "แก้ไขแล้ว"
+    await telegramApi('editMessageReplyMarkup', {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: doneMarkup
+    });
+
+    // ส่งข้อความอัปเดตสถานะ (เหมือนที่บอทตอบในกลุ่ม LINE)
+    await telegramApi('sendMessage', {
+        chat_id: chatId,
+        reply_to_message_id: messageId,
+        allow_sending_without_reply: true,
+        text: `✅ [อัปเดตสถานะ]\nFeedback ${ticketLabel} ได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${doneTime}`
+    });
+}
+
+app.post(
+    '/api/telegram-webhook',
+    express.json({ limit: '256kb' }),
+    verifyTelegramSecret,
+    async (req, res) => {
+        try {
+            const query = req.body?.callback_query;
+            if (query) await handleTelegramCallback(query);
+        } catch (err) {
+            console.error('❌ Telegram webhook error:', err.message);
+        }
+
+        // ตอบ 200 เสมอ เพื่อไม่ให้ Telegram ส่ง update เดิมซ้ำ
         return res.status(200).send('OK');
     }
 );
