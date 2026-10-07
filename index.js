@@ -36,7 +36,7 @@ const env = (name) => process.env[name]?.trim() || '';
     if (!env('LINE_CHANNEL_ACCESS_TOKEN')) console.error('❌ LINE_CHANNEL_ACCESS_TOKEN is not set');
     if (!env('LINE_TARGET_ID')) console.warn('⚠️ LINE_TARGET_ID is not set — feedback cannot be pushed (คำสั่ง "id" ในกลุ่มยังใช้ได้)');
     if (!env('UPSTASH_REDIS_REST_URL') || !env('UPSTASH_REDIS_REST_TOKEN')) {
-        console.warn('⚠️ Redis is not configured — ใช้ in-memory แทน (เลขลำดับ/สถานะ ticket/rate limit จะหายเมื่อ restart และไม่ทำงานข้าม instance บน Vercel)');
+        console.warn('⚠️ Redis is not configured — ใช้ in-memory แทน (เลขลำดับ/สถานะ ticket/rate limit จะหายเมื่อ restart และไม่ทำงานข้าม instance)');
     }
 })();
 
@@ -47,7 +47,7 @@ app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('X-XSS-Protection', '0');
+    res.setHeader('X-XSS-Protection', '0'); // header เก่า แนะนำให้ปิด (0) เพราะอาจสร้างช่องโหว่เองในบราวเซอร์รุ่นเก่า
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
     res.setHeader('Cache-Control', 'no-store');
@@ -55,6 +55,7 @@ app.use((req, res, next) => {
 });
 
 // CORS: ปิดไว้เป็นค่าเริ่มต้น (same-origin เท่านั้น)
+// ถ้าหน้าเว็บอยู่คนละโดเมน ให้ตั้ง ALLOWED_ORIGINS=https://example.com,https://www.example.com
 app.use('/api/feedback', (req, res, next) => {
     const allowed = env('ALLOWED_ORIGINS').split(',').map((s) => s.trim()).filter(Boolean);
     const origin = req.headers.origin;
@@ -143,6 +144,7 @@ async function getNextTicketNumber() {
     const year = getBangkokYear();
 
     if (redisEnabled()) {
+        // 🔒 โหมดเข้มงวด: ถ้า Redis ใช้ไม่ได้ จะไม่ถอยไปนับใน memory (เสี่ยงเลขซ้ำ) แต่ throw error ให้ผู้ใช้ส่งใหม่
         const key = `feedback:ticket_counter:${year}`;
         let lastError;
         for (let attempt = 1; attempt <= 2; attempt++) {
@@ -165,13 +167,18 @@ async function getNextTicketNumber() {
         throw new Error(`TICKET_COUNTER_UNAVAILABLE: ${lastError?.message}`);
     }
 
+    // ไม่ได้ตั้งค่า Redis เลย: ถ้าบังคับด้วย REQUIRE_REDIS=true จะไม่ยอมใช้ memory
     if (env('REQUIRE_REDIS') === 'true') {
         throw new Error('TICKET_COUNTER_UNAVAILABLE: Redis is required but not configured');
     }
 
-    if (memory.counterYear !== year) {
+    // ✅ [แก้ไขจุดที่ 1] แก้ปัญหาเลขซ้ำกันบน Vercel (Cold Start) ในกรณีที่ใช้ Memory Fallback
+    if (memory.counterYear !== year || memory.counter === 0) {
         memory.counterYear = year;
-        memory.counter = 0;
+        // ป้องกัน Vercel cold start เริ่มนับ 1 ใหม่ตลอดเวลา โดยใช้วินาทีของวันเป็นตัวช่วยดันตัวเลข
+        const startOfDay = new Date().setHours(0, 0, 0, 0);
+        const secondsSinceMidnight = Math.floor((Date.now() - startOfDay) / 1000);
+        memory.counter = secondsSinceMidnight; 
     }
     memory.counter += 1;
     return memory.counter;
@@ -210,6 +217,7 @@ async function consumeRateLimit(key, limit, windowSec) {
     if (redisEnabled()) {
         try {
             const rkey = `feedback:rl:${key}`;
+            // SET NX EX + INCR ใน pipeline เดียว ป้องกัน key ค้างโดยไม่มี TTL
             const [, count] = await redisPipeline([
                 ['SET', rkey, '0', 'NX', 'EX', windowSec],
                 ['INCR', rkey]
@@ -253,7 +261,7 @@ async function feedbackRateLimit(req, res, next) {
         next();
     } catch (err) {
         console.error('❌ Rate limit middleware error:', err.message);
-        next();
+        next(); // ถ้าตัว limiter เสียเอง ไม่ควรทำให้ฟอร์มใช้ไม่ได้ทั้งระบบ
     }
 }
 
@@ -262,20 +270,27 @@ async function feedbackRateLimit(req, res, next) {
 // ---------------------------------------------------------------------------
 const codePointLength = (str) => [...str].length;
 
+/**
+ * ทำความสะอาดข้อความ: ลบ Control Characters, Null Bytes และอักขระควบคุมทิศทางข้อความ (Bidi)
+ * ที่ใช้หลอกตาได้ (ไม่แปลงเป็น HTML Entities เพื่อให้แสดงผลบน LINE Flex ได้ถูกต้อง)
+ */
 function cleanTextInput(input) {
     if (typeof input !== 'string') return '';
     return input
         .normalize('NFC')
         .replace(/\r\n?/g, '\n')
-        .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '')
-        .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/g, '')
+        .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '')              // Control Characters
+        .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/g, '')    // Zero-width / Bidi override
         .replace(/\n{3,}/g, '\n\n')
         .trim();
 }
 
+/**
+ * ตรวจสอบ Cloudflare Turnstile (เปิดใช้เมื่อกำหนด TURNSTILE_SECRET_KEY)
+ */
 async function verifyTurnstile(token, ip) {
     const secret = env('TURNSTILE_SECRET_KEY');
-    if (!secret) return true;
+    if (!secret) return true; // ไม่ได้เปิดใช้งาน
     if (typeof token !== 'string' || !token || token.length > 2048) return false;
 
     try {
@@ -303,6 +318,7 @@ function verifyLineSignature(req, res, next) {
     const channelSecret = env('LINE_CHANNEL_SECRET');
     const signature = req.headers['x-line-signature'];
 
+    // 🔒 Fail-closed: ถ้าไม่ได้ตั้งค่า Secret ต้องปฏิเสธ ห้ามปล่อยผ่าน
     if (!channelSecret) {
         console.error('❌ LINE_CHANNEL_SECRET is not set. Rejecting webhook request.');
         return res.status(500).send('Server misconfigured');
@@ -317,6 +333,7 @@ function verifyLineSignature(req, res, next) {
         .update(req.rawBody)
         .digest('base64');
 
+    // 🔒 ป้องกัน Timing Attack
     const signatureBuffer = Buffer.from(signature);
     const hashBuffer = Buffer.from(hash);
 
@@ -428,6 +445,10 @@ function buildFlexPayload({ customerText, name, phone, formattedDate, ticketSeqN
     };
 }
 
+/**
+ * ส่ง LINE Push Alert (Flex Message)
+ * ใช้ X-Line-Retry-Key ทำให้การ retry ปลอดภัย ไม่ส่งซ้ำ
+ */
 async function sendLinePushAlert(payloadData) {
     const channelToken = env('LINE_CHANNEL_ACCESS_TOKEN');
     const targetId = env('LINE_TARGET_ID');
@@ -452,11 +473,13 @@ async function sendLinePushAlert(payloadData) {
                 body
             });
 
+            // 409 = LINE เคยรับ Retry Key นี้ไปแล้ว (ส่งสำเร็จไปก่อนหน้า)
             if (response.ok || response.status === 409) return true;
 
             const errBody = (await response.text()).slice(0, 500);
             console.error(`❌ LINE API Rejected Push (HTTP ${response.status}):`, errBody);
 
+            // Error ฝั่งผู้ใช้ (4xx ยกเว้น 429) ไม่ต้อง retry
             if (response.status < 500 && response.status !== 429) return false;
         } catch (err) {
             console.error('❌ Network Error while sending LINE Push Alert:', err.message);
@@ -499,8 +522,9 @@ app.post(
         try {
             const body = req.body ?? {};
 
+            // 🍯 Honeypot: ฟิลด์ซ่อน "website" บอทมักกรอก ผู้ใช้จริงจะเว้นว่าง
             if (typeof body.website === 'string' && body.website.trim() !== '') {
-                return res.json({ success: true, line_sent: true });
+                return res.json({ success: true, line_sent: true }); // ตอบเหมือนสำเร็จ ไม่บอกบอท
             }
 
             if (typeof body.text !== 'string') {
@@ -524,6 +548,7 @@ app.post(
                 return res.status(400).json({ error: 'รูปแบบเบอร์โทรไม่ถูกต้อง' });
             }
 
+            // 🤖 ตรวจสอบ Turnstile (ถ้าเปิดใช้งาน)
             const humanOk = await verifyTurnstile(body.turnstileToken, req.ip);
             if (!humanOk) {
                 return res.status(403).json({ error: 'การตรวจสอบความปลอดภัยไม่ผ่าน กรุณาลองใหม่' });
@@ -559,6 +584,7 @@ app.post(
             });
 
             if (!lineSuccess) {
+                // แจ้งผู้ใช้ตามจริงว่าไม่สำเร็จ เพื่อให้กดส่งใหม่ได้ ไม่ใช่ตอบว่าสำเร็จทั้งที่ข้อความหาย
                 return res.status(502).json({
                     success: false,
                     line_sent: false,
@@ -603,33 +629,24 @@ async function handlePostback(event) {
 
     const isFirstResolve = await markTicketResolved(ticketId);
 
-    // ดึงเวลาปัจจุบันในรูปแบบ ไทย (HH:mm น.)
-    const now = new Date();
-    const resolveTime = now.toLocaleTimeString('th-TH', {
-        timeZone: 'Asia/Bangkok',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false
-    }) + ' น.';
-
     if (!isFirstResolve) {
         console.log(`⚠️ Ticket ID: ${ticketId} ถูกแก้ไขไปแล้ว (ข้ามการประมวลผล)`);
-        if (event.replyToken) {
-            await sendLineReply(
-                event.replyToken,
-                `⚠️ [แจ้งเตือน]\nFeedback นี้ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`
-            );
-        }
+        await sendLineReply(event.replyToken, `ℹ️ Feedback #${seq || '?'} ถูกทำเครื่องหมายว่าแก้ไขแล้วก่อนหน้านี้`);
         return;
     }
 
-    console.log(`✅ บันทึกการแก้ไข Ticket ID: ${ticketId} (#${seq || '?'}) สำเร็จ`);
-    if (event.replyToken) {
-        await sendLineReply(
-            event.replyToken,
-            `✅ [อัปเดตสถานะ]\nFeedback #${seq || '?'}\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${resolveTime}`
-        );
-    }
+    // ✅ [แก้ไขจุดที่ 2] สร้างข้อความตอบกลับเมื่อกดปุ่ม "ทำการแก้ไขแล้ว" สำเร็จ
+    const now = new Date();
+    const formattedDate = now.toLocaleString('th-TH', {
+        timeZone: 'Asia/Bangkok',
+        year: 'numeric', month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+    }) + ' น.';
+
+    const replyMessage = `✅ อัปเดตสถานะ Feedback #${seq || '?'}\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว\nเมื่อเวลา: ${formattedDate}`;
+    await sendLineReply(event.replyToken, replyMessage);
+
+    console.log(`✅ บันทึกการแก้ไข Ticket ID: ${ticketId} (#${seq || '?'}) สำเร็จ พร้อมส่งข้อความแจ้งเตือนกลับเข้ากลุ่ม`);
 }
 
 async function handleTextMessage(event) {
@@ -639,6 +656,8 @@ async function handleTextMessage(event) {
     if (!groupId || !event.replyToken || typeof text !== 'string') return;
     if (text.toLowerCase().trim() !== 'id') return;
 
+    // คำสั่ง "id" ใช้สำหรับตั้งค่าครั้งแรก — ปิดอัตโนมัติเมื่อมี LINE_TARGET_ID แล้ว
+    // (หากต้องการเปิดต่อ ให้ตั้ง ENABLE_ID_COMMAND=true)
     const idCommandEnabled = !env('LINE_TARGET_ID') || env('ENABLE_ID_COMMAND') === 'true';
     if (!idCommandEnabled) return;
 
@@ -660,10 +679,12 @@ app.post(
                     await handleTextMessage(event);
                 }
             } catch (err) {
+                // error ใน event หนึ่งต้องไม่ทำให้ event อื่นหยุดทำงาน
                 console.error('❌ Webhook event error:', err.message);
             }
         }
 
+        // ตอบ 200 เสมอ เพื่อไม่ให้ LINE ส่ง event เดิมซ้ำ
         return res.status(200).send('OK');
     }
 );
