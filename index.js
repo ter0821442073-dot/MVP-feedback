@@ -172,13 +172,9 @@ async function getNextTicketNumber() {
         throw new Error('TICKET_COUNTER_UNAVAILABLE: Redis is required but not configured');
     }
 
-    // ✅ [แก้ไขจุดที่ 1] แก้ปัญหาเลขซ้ำกันบน Vercel (Cold Start) ในกรณีที่ใช้ Memory Fallback
-    if (memory.counterYear !== year || memory.counter === 0) {
+    if (memory.counterYear !== year) {
         memory.counterYear = year;
-        // ป้องกัน Vercel cold start เริ่มนับ 1 ใหม่ตลอดเวลา โดยใช้วินาทีของวันเป็นตัวช่วยดันตัวเลข
-        const startOfDay = new Date().setHours(0, 0, 0, 0);
-        const secondsSinceMidnight = Math.floor((Date.now() - startOfDay) / 1000);
-        memory.counter = secondsSinceMidnight; 
+        memory.counter = 0;
     }
     memory.counter += 1;
     return memory.counter;
@@ -359,10 +355,16 @@ function buildFlexPayload({ customerText, name, phone, formattedDate, ticketSeqN
         ? [...singleLine].slice(0, 50).join('') + '...'
         : singleLine;
 
+    // จำกัดข้อความที่จะใส่ใน postback ไว้ที่ 20 ตัวอักษร เพื่อไม่ให้เกิน limit 300 ตัวอักษรของ URL Search Params
+    const postbackText = codePointLength(singleLine) > 20
+        ? [...singleLine].slice(0, 20).join('') + '...'
+        : singleLine;
+
     const postbackData = new URLSearchParams({
         action: 'resolve',
         ticket_id: ticketId,
-        seq: String(ticketSeqNumber)
+        seq: String(ticketSeqNumber),
+        text: postbackText // เก็บข้อความย่อมาใช้ใน reply ตอนกดแก้ไข
     }).toString();
 
     return {
@@ -624,6 +626,7 @@ async function handlePostback(event) {
     const action = params.get('action');
     const ticketId = params.get('ticket_id');
     const seq = params.get('seq');
+    const fbText = params.get('text') || 'ไม่ระบุ'; // ดึงข้อความออกมาจาก postback
 
     if (action !== 'resolve' || !ticketId || !UUID_REGEX.test(ticketId)) return;
 
@@ -631,22 +634,29 @@ async function handlePostback(event) {
 
     if (!isFirstResolve) {
         console.log(`⚠️ Ticket ID: ${ticketId} ถูกแก้ไขไปแล้ว (ข้ามการประมวลผล)`);
-        await sendLineReply(event.replyToken, `ℹ️ Feedback #${seq || '?'} ถูกทำเครื่องหมายว่าแก้ไขแล้วก่อนหน้านี้`);
+        
+        // ตอบกลับเมื่อเคยถูกแก้ไขไปแล้ว
+        await sendLineReply(
+            event.replyToken, 
+            `⚠️ [แจ้งเตือน]\nFeedback นี้ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`
+        );
         return;
     }
 
-    // ✅ [แก้ไขจุดที่ 2] สร้างข้อความตอบกลับเมื่อกดปุ่ม "ทำการแก้ไขแล้ว" สำเร็จ
+    console.log(`✅ บันทึกการแก้ไข Ticket ID: ${ticketId} (#${seq || '?'}) สำเร็จ`);
+
+    // เวลาปัจจุบันที่แก้ไขสำเร็จ (ดึงเวลาตอนที่สตาฟกดปุ่ม)
     const now = new Date();
-    const formattedDate = now.toLocaleString('th-TH', {
+    const timeStr = now.toLocaleTimeString('th-TH', {
         timeZone: 'Asia/Bangkok',
-        year: 'numeric', month: 'short', day: 'numeric',
-        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+        hour: '2-digit', minute: '2-digit'
     }) + ' น.';
 
-    const replyMessage = `✅ อัปเดตสถานะ Feedback #${seq || '?'}\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว\nเมื่อเวลา: ${formattedDate}`;
-    await sendLineReply(event.replyToken, replyMessage);
-
-    console.log(`✅ บันทึกการแก้ไข Ticket ID: ${ticketId} (#${seq || '?'}) สำเร็จ พร้อมส่งข้อความแจ้งเตือนกลับเข้ากลุ่ม`);
+    // ตอบกลับครั้งแรกที่บันทึกสำเร็จ
+    await sendLineReply(
+        event.replyToken, 
+        `✅ [อัปเดตสถานะ]\nFeedback: "${fbText}"\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${timeStr}`
+    );
 }
 
 async function handleTextMessage(event) {
