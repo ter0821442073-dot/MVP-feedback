@@ -5,23 +5,69 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MVPKalasin Feedback</title>
     <style>
-        body { font-family: sans-serif; max-width: 650px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #333; }
-        .form-group { margin-bottom: 18px; }
-        label { font-weight: bold; display: block; margin-bottom: 6px; }
-        .sub-label { font-size: 12px; color: #666; font-weight: normal; }
-        input[type="text"], input[type="tel"], textarea { 
-            width: 100%; padding: 10px; box-sizing: border-box; font-size: 14px; 
-            border: 1px solid #ccc; border-radius: 6px; outline: none;
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600&display=swap');
+
+        :root {
+            --bg: #f4f5f7;
+            --card: #ffffff;
+            --text: #1e293b;
+            --muted: #64748b;
+            --line: #e2e8f0;
+            --accent: #4f46e5;
+            --accent-dark: #4338ca;
         }
+
+        html { background: var(--bg); }
+
+        /* body ทำหน้าที่เป็นการ์ด เพื่อไม่ต้องเพิ่ม HTML ใหม่ */
+        body {
+            font-family: 'Noto Sans Thai', sans-serif;
+            max-width: 560px;
+            margin: 48px auto;
+            padding: 36px 32px;
+            background: var(--card);
+            border-radius: 16px;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 32px rgba(15, 23, 42, 0.06);
+            line-height: 1.6;
+            color: var(--text);
+            box-sizing: border-box;
+        }
+
+        h2 { margin: 0 0 28px; font-size: 24px; font-weight: 600; letter-spacing: -0.01em; }
+
+        .form-group { margin-bottom: 22px; }
+        label { font-weight: 500; font-size: 15px; display: block; margin-bottom: 8px; }
+        .sub-label { font-size: 12.5px; color: var(--muted); font-weight: 400; }
+
+        input[type="text"], input[type="tel"], textarea {
+            width: 100%; padding: 12px 14px; box-sizing: border-box; font-size: 15px;
+            font-family: inherit; color: var(--text); background: #fff;
+            border: 1px solid var(--line); border-radius: 10px; outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        input::placeholder, textarea::placeholder { color: #94a3b8; }
         input[type="text"]:focus, input[type="tel"]:focus, textarea:focus {
-            border-color: #007bff; box-shadow: 0 0 4px rgba(0,123,255,0.25);
+            border-color: var(--accent); box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.12);
         }
-        textarea { height: 120px; resize: vertical; }
-        button { padding: 12px 20px; background-color: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; width: 100%; font-weight: bold; transition: background 0.2s; }
-        button:hover { background-color: #0056b3; }
-        button:disabled { background-color: #a0c4ff; cursor: not-allowed; }
-        #result { margin-top: 20px; padding: 15px 20px; border-radius: 6px; display: none; text-align: center; }
-        .result-title { font-size: 18px; font-weight: bold; margin-bottom: 8px; }
+        textarea { height: 130px; resize: vertical; }
+
+        button {
+            padding: 13px 20px; background-color: var(--accent); color: white; border: none;
+            border-radius: 10px; cursor: pointer; font-size: 16px; font-family: inherit;
+            width: 100%; font-weight: 500;
+            transition: background 0.2s, transform 0.1s;
+        }
+        button:hover { background-color: var(--accent-dark); }
+        button:active { transform: scale(0.99); }
+        button:disabled { background-color: #a5b4fc; cursor: not-allowed; transform: none; }
+        button:focus-visible { outline: 3px solid rgba(79, 70, 229, 0.35); outline-offset: 2px; }
+
+        #result { margin-top: 22px; padding: 16px 20px; border-radius: 10px; display: none; text-align: center; }
+        .result-title { font-size: 17px; font-weight: 600; margin-bottom: 6px; }
+
+        @media (max-width: 600px) {
+            body { margin: 0; border-radius: 0; box-shadow: none; min-height: 100vh; padding: 28px 20px; }
+        }
     </style>
 </head>
 <body>
@@ -41,7 +87,7 @@
     </div>
 
     <div class="form-group">
-        <label for="inputText">ข้อความ Feedback <span style="color:red">*</span></label>
+        <label for="inputText">ข้อความ Feedback <span style="color:#dc2626">*</span></label>
         <textarea id="inputText" maxlength="300" placeholder="แจ้งปัญหา ข้อเสนอแนะ หรือความประทับใจของคุณได้ที่นี่...(ไม่เกิน 300 ตัวอักษร) "></textarea>
     </div>
 
@@ -86,15 +132,15 @@
                 // กรณีเกิดข้อผิดพลาดจาก Backend หรือส่ง LINE ไม่สำเร็จ
                 if (data.error || data.line_sent === false) {
                     resultDiv.style.display = 'block';
-                    resultDiv.style.backgroundColor = '#f8d7da';
-                    resultDiv.style.borderColor = '#f5c6cb';
-                    resultDiv.style.border = '1px solid #f5c6cb';
+                    resultDiv.style.backgroundColor = '#fef2f2';
+                    resultDiv.style.borderColor = '#fecaca';
+                    resultDiv.style.border = '1px solid #fecaca';
                     
                     const errorText = data.error || 'เกิดข้อผิดพลาดในการส่งข้อมูลไปยังระบบ กรุณาลองใหม่อีกครั้ง';
                     
                     resultDiv.innerHTML = `
-                        <div class="result-title" style="color: #721c24;">เกิดข้อผิดพลาด!</div>
-                        <p style="margin: 0; color: #721c24;">
+                        <div class="result-title" style="color: #991b1b;">เกิดข้อผิดพลาด!</div>
+                        <p style="margin: 0; color: #991b1b;">
                             ${errorText}
                         </p>
                     `;
@@ -103,19 +149,19 @@
 
                 // กรณีส่งสำเร็จเรียบร้อย (กล่องสีเขียว)
                 resultDiv.style.display = 'block';
-                resultDiv.style.backgroundColor = '#d4edda';
-                resultDiv.style.borderColor = '#c3e6cb';
-                resultDiv.style.border = '1px solid #c3e6cb';
+                resultDiv.style.backgroundColor = '#f0fdf4';
+                resultDiv.style.borderColor = '#bbf7d0';
+                resultDiv.style.border = '1px solid #bbf7d0';
                 
                 let contactMsg = phone 
                     ? `หากมีข้อสงสัยเพิ่มเติม เจ้าหน้าที่อาจติดต่อกลับไปยังเบอร์ <strong>${phone}</strong> ครับ`
                     : 'ขอบคุณสำหรับทุกข้อเสนอแนะเพื่อนำไปปรับปรุงการบริการครับ';
 
                 resultDiv.innerHTML = `
-                    <div class="result-title" style="color: #004085;">ส่งข้อมูลเรียบร้อยแล้ว!</div>
-                    <p style="margin: 0; color: #155724;">
+                    <div class="result-title" style="color: #166534;">ส่งข้อมูลเรียบร้อยแล้ว!</div>
+                    <p style="margin: 0; color: #166534;">
                         ขอบคุณสำหรับ Feedback ของคุณ${name ? ' ' + name : ''} <br>
-                        <small style="color: #155724;">${contactMsg}</small>
+                        <small style="color: #15803d;">${contactMsg}</small>
                     </p>
                 `;
 
@@ -125,13 +171,13 @@
             } catch (err) {
                 // กรณี Network Error / Catch Error (กล่องสีแดง)
                 resultDiv.style.display = 'block';
-                resultDiv.style.backgroundColor = '#f8d7da';
-                resultDiv.style.borderColor = '#f5c6cb';
-                resultDiv.style.border = '1px solid #f5c6cb';
+                resultDiv.style.backgroundColor = '#fef2f2';
+                resultDiv.style.borderColor = '#fecaca';
+                resultDiv.style.border = '1px solid #fecaca';
                 
                 resultDiv.innerHTML = `
-                    <div class="result-title" style="color: #721c24;">เกิดข้อผิดพลาด!</div>
-                    <p style="margin: 0; color: #721c24;">
+                    <div class="result-title" style="color: #991b1b;">เกิดข้อผิดพลาด!</div>
+                    <p style="margin: 0; color: #991b1b;">
                         ไม่สามารถเชื่อมต่อระบบได้ กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองใหม่อีกครั้ง
                     </p>
                 `;
