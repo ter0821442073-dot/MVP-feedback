@@ -457,6 +457,8 @@ function buildFlexPayload({ customerText, name, phone, formattedDate, ticketSeqN
 /**
  * ส่ง LINE Push Alert (Flex Message)
  * ใช้ X-Line-Retry-Key ทำให้การ retry ปลอดภัย ไม่ส่งซ้ำ
+ * @returns {Promise<{ok: boolean, quotaExceeded: boolean}>}
+ *   quotaExceeded = true เฉพาะกรณี LINE ตอบ 429 ว่าโควต้าข้อความรายเดือนหมด
  */
 async function sendLinePushAlert(payloadData) {
     const channelToken = env('LINE_CHANNEL_ACCESS_TOKEN');
@@ -464,7 +466,7 @@ async function sendLinePushAlert(payloadData) {
 
     if (!channelToken || !targetId) {
         console.error('❌ Missing LINE API Token or Target ID in environment variables');
-        return false;
+        return { ok: false, quotaExceeded: false };
     }
 
     const flexPayload = buildFlexPayload(payloadData);
@@ -483,31 +485,30 @@ async function sendLinePushAlert(payloadData) {
             });
 
             // 409 = LINE เคยรับ Retry Key นี้ไปแล้ว (ส่งสำเร็จไปก่อนหน้า)
-            if (response.ok || response.status === 409) return true;
+            if (response.ok || response.status === 409) return { ok: true, quotaExceeded: false };
 
             const errBody = (await response.text()).slice(0, 500);
             console.error(`❌ LINE API Rejected Push (HTTP ${response.status}):`, errBody);
 
-            // โควต้าข้อความรายเดือนหมด: retry ไม่มีประโยชน์ (และเปลืองเวลา) ให้หยุดทันที
-            const isMonthlyLimit = response.status === 429 && /monthly limit/i.test(errBody);
-            if (isMonthlyLimit) {
+            // โควต้าข้อความรายเดือนหมด: retry ไม่มีประโยชน์ ให้หยุดทันทีและแจ้งผู้เรียกว่าโควต้าหมด
+            if (response.status === 429 && /monthly limit/i.test(errBody)) {
                 console.error('🚫 LINE monthly message quota reached — will not retry');
-                return false;
+                return { ok: false, quotaExceeded: true };
             }
 
             // Error ฝั่งผู้ใช้ (4xx ยกเว้น 429) ไม่ต้อง retry
-            if (response.status < 500 && response.status !== 429) return false;
+            if (response.status < 500 && response.status !== 429) return { ok: false, quotaExceeded: false };
         } catch (err) {
             console.error('❌ Network Error while sending LINE Push Alert:', err.message);
         }
 
         if (attempt < 2) await sleep(500);
     }
-    return false;
+    return { ok: false, quotaExceeded: false };
 }
 
 /**
- * ส่งแจ้งเตือนสำรองไป Telegram (ใช้เมื่อ LINE ส่งไม่สำเร็จ เช่น โควต้ารายเดือนหมด)
+ * ส่งแจ้งเตือนสำรองไป Telegram (ใช้เฉพาะเมื่อโควต้าข้อความรายเดือนของ LINE หมดเท่านั้น)
  * ต้องตั้ง TELEGRAM_BOT_TOKEN และ TELEGRAM_CHAT_ID
  */
 async function sendTelegramAlert({ customerText, name, phone, formattedDate, ticketSeqNumber }) {
@@ -691,24 +692,28 @@ app.post(
                 ticketId
             };
 
-            const lineSuccess = await sendLinePushAlert(alertData);
-
-            // LINE ล้มเหลว (เช่น โควต้าหมด) → ส่งสำรองไป Telegram เพื่อไม่ให้ Feedback หาย
-            let telegramSuccess = false;
-            if (!lineSuccess) {
-                telegramSuccess = await sendTelegramAlert(alertData);
+            // 1) ส่งเข้า LINE ก่อนเสมอ
+            const lineResult = await sendLinePushAlert(alertData);
+            if (lineResult.ok) {
+                return res.json({ success: true, line_sent: true, delivered_via: 'line' });
             }
 
-            if (!lineSuccess && !telegramSuccess) {
-                // ไม่มีช่องทางไหนส่งสำเร็จ: แจ้งผู้ใช้ตามจริง เพื่อให้กดส่งใหม่ได้
-                return res.status(502).json({
-                    success: false,
-                    line_sent: false,
-                    error: 'ไม่สามารถส่งข้อความได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง'
-                });
+            // 2) ส่งไป Telegram เฉพาะเมื่อโควต้า LINE รายเดือนหมดเท่านั้น
+            if (lineResult.quotaExceeded) {
+                const telegramOk = await sendTelegramAlert(alertData);
+                if (telegramOk) {
+                    // ตอบสำเร็จเหมือนปกติ ลูกค้าไม่เห็นข้อผิดพลาด
+                    // (line_sent: true เพื่อให้หน้าเว็บเดิมที่ตรวจ field นี้ไม่แสดง error; ช่องทางจริงดูที่ delivered_via)
+                    return res.json({ success: true, line_sent: true, delivered_via: 'telegram' });
+                }
             }
 
-            return res.json({ success: true, line_sent: lineSuccess, telegram_sent: telegramSuccess });
+            // 3) ส่งไม่สำเร็จทั้งหมด: แจ้งผู้ใช้ตามจริง เพื่อให้กดส่งใหม่ได้
+            return res.status(502).json({
+                success: false,
+                line_sent: false,
+                error: 'ไม่สามารถส่งข้อความได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง'
+            });
         } catch (error) {
             console.error('❌ Error inside /api/feedback:', error.message);
             return res.status(500).json({ error: 'เกิดข้อผิดพลาดภายในระบบ' });
