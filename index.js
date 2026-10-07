@@ -36,7 +36,7 @@ const env = (name) => process.env[name]?.trim() || '';
     if (!env('LINE_CHANNEL_ACCESS_TOKEN')) console.error('❌ LINE_CHANNEL_ACCESS_TOKEN is not set');
     if (!env('LINE_TARGET_ID')) console.warn('⚠️ LINE_TARGET_ID is not set — feedback cannot be pushed (คำสั่ง "id" ในกลุ่มยังใช้ได้)');
     if (!env('UPSTASH_REDIS_REST_URL') || !env('UPSTASH_REDIS_REST_TOKEN')) {
-        console.warn('⚠️ Redis is not configured — ใช้ in-memory แทน (เลขลำดับ/สถานะ ticket/rate limit จะหายเมื่อ restart และไม่ทำงานข้าม instance)');
+        console.warn('⚠️ Redis is not configured — ใช้ in-memory แทน (เลขลำดับ/สถานะ ticket/rate limit/ข้อมูล Feedback จะหายเมื่อ restart และไม่ทำงานข้าม instance)');
     }
 })();
 
@@ -261,6 +261,101 @@ async function markTicketResolved(ticketId) {
     }
     memory.resolved.add(ticketId);
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// 💾 Feedback Persistence: เก็บข้อมูล Feedback ลง Redis อัตโนมัติ (fallback เป็น In-Memory)
+// ---------------------------------------------------------------------------
+// เก็บข้อมูลกี่วัน (มีชื่อ/เบอร์โทรลูกค้า ควรกำหนดอายุเสมอ) ปรับด้วย env FEEDBACK_RETENTION_DAYS
+const FEEDBACK_TTL_SEC = (Number(process.env.FEEDBACK_RETENTION_DAYS) || 365) * 60 * 60 * 24;
+const FEEDBACK_INDEX_KEY = 'feedback:index'; // sorted set: score = เวลาที่สร้าง (ms), member = ticketId
+const feedbackKey = (ticketId) => `feedback:ticket:${ticketId}`;
+
+const feedbackMemory = new Map(); // ticketId -> record (สำรองเมื่อไม่มี Redis / Redis ล้มเหลว)
+
+function rememberFeedbackInMemory(record) {
+    if (feedbackMemory.size >= 3000) {
+        feedbackMemory.delete(feedbackMemory.keys().next().value); // ลบอันเก่าสุด
+    }
+    feedbackMemory.set(record.ticketId, record);
+}
+
+/**
+ * @param {'sent'|'failed'} status
+ * @param {'line'|'telegram'|null} deliveredVia
+ */
+function buildFeedbackRecord(alertData, status, deliveredVia) {
+    return {
+        ticketId: alertData.ticketId,
+        seq: status === 'failed' ? null : alertData.ticketSeqNumber, // เลขที่ถูกคืนแล้วจะไม่ผูกกับ record
+        year: getBangkokYear(),
+        text: alertData.customerText,
+        name: alertData.name || null,
+        phone: alertData.phone || null,
+        status,                 // sent | failed | resolved
+        deliveredVia,           // line | telegram | null
+        createdAt: Date.now(),
+        createdAtLabel: alertData.formattedDate,
+        resolvedAt: null,
+        resolvedBy: null,
+    };
+}
+
+/**
+ * บันทึก Feedback (ไม่ throw — ความล้มเหลวของการเก็บข้อมูลต้องไม่ทำให้ลูกค้าเห็น error
+ * ทั้งที่แจ้งเตือนส่งสำเร็จแล้ว)
+ */
+async function saveFeedbackRecord(record) {
+    rememberFeedbackInMemory(record);
+
+    if (!redisEnabled()) return false;
+
+    try {
+        const commands = [
+            ['SET', feedbackKey(record.ticketId), JSON.stringify(record), 'EX', FEEDBACK_TTL_SEC],
+            ['ZADD', FEEDBACK_INDEX_KEY, record.createdAt, record.ticketId],
+            // ล้าง index ของรายการที่หมดอายุแล้ว ไม่ให้ sorted set โตไม่จำกัด
+            ['ZREMRANGEBYSCORE', FEEDBACK_INDEX_KEY, '-inf', Date.now() - FEEDBACK_TTL_SEC * 1000],
+        ];
+        if (record.seq) {
+            commands.push(['SET', `feedback:seq:${record.year}:${record.seq}`, record.ticketId, 'EX', FEEDBACK_TTL_SEC]);
+        }
+        await redisPipeline(commands);
+        return true;
+    } catch (err) {
+        console.error('⚠️ saveFeedbackRecord failed (ignored):', err.message);
+        return false;
+    }
+}
+
+/**
+ * อัปเดตบางฟิลด์ของ record (เช่น ตอนกด "ทำการแก้ไขแล้ว") — ใช้ KEEPTTL ไม่ต่ออายุข้อมูลโดยไม่ตั้งใจ
+ */
+async function updateFeedbackRecord(ticketId, patch) {
+    try {
+        let record = null;
+
+        if (redisEnabled()) {
+            const raw = await redisCommand(['GET', feedbackKey(ticketId)]);
+            if (raw) record = JSON.parse(raw);
+        }
+        if (!record) record = feedbackMemory.get(ticketId) || null;
+        if (!record) {
+            console.warn(`⚠️ updateFeedbackRecord: ไม่พบ record ของ ${ticketId} (อาจหมดอายุ หรือเป็น ticket เก่าก่อนเปิดใช้ระบบเก็บข้อมูล)`);
+            return false;
+        }
+
+        const updated = { ...record, ...patch };
+        feedbackMemory.set(ticketId, updated);
+
+        if (redisEnabled()) {
+            await redisCommand(['SET', feedbackKey(ticketId), JSON.stringify(updated), 'KEEPTTL']);
+        }
+        return true;
+    } catch (err) {
+        console.error('⚠️ updateFeedbackRecord failed (ignored):', err.message);
+        return false;
+    }
 }
 
 /**
@@ -754,6 +849,7 @@ app.post(
             const lineResult = await sendLinePushAlert(alertData);
             if (lineResult.ok) {
                 await rememberLineTicket(ticketSeqNumber, ticketId); // จำไว้เป็นอ้างอิงสำหรับ Telegram
+                await saveFeedbackRecord(buildFeedbackRecord(alertData, 'sent', 'line')); // 💾 เก็บลง Redis
                 return res.json({ success: true, line_sent: true, delivered_via: 'line' });
             }
 
@@ -763,6 +859,7 @@ app.post(
                 const lastLineTicket = await getLastLineTicket();
                 const telegramOk = await sendTelegramAlert({ ...alertData, lastLineTicket });
                 if (telegramOk) {
+                    await saveFeedbackRecord(buildFeedbackRecord(alertData, 'sent', 'telegram')); // 💾 เก็บลง Redis
                     // ตอบสำเร็จเหมือนปกติ ลูกค้าไม่เห็นข้อผิดพลาด
                     // (line_sent: true เพื่อให้หน้าเว็บเดิมที่ตรวจ field นี้ไม่แสดง error; ช่องทางจริงดูที่ delivered_via)
                     return res.json({ success: true, line_sent: true, delivered_via: 'telegram' });
@@ -771,6 +868,7 @@ app.post(
 
             // 3) ส่งไม่สำเร็จเลย: คืนเลข Ticket เพื่อไม่ให้เลขข้าม แล้วแจ้งผู้ใช้ให้กดส่งใหม่
             await releaseTicketNumber(ticketSeqNumber);
+            await saveFeedbackRecord(buildFeedbackRecord(alertData, 'failed', null)); // 💾 เก็บข้อความลูกค้าไว้ ไม่ให้หาย
             return res.status(502).json({
                 success: false,
                 line_sent: false,
@@ -828,6 +926,14 @@ async function handlePostback(event) {
     }
 
     console.log(`✅ บันทึกการแก้ไข Ticket ID: ${ticketId} (${ticketLabel}) สำเร็จ`);
+
+    // 💾 อัปเดตสถานะใน record ที่เก็บไว้ (ไม่ throw)
+    await updateFeedbackRecord(ticketId, {
+        status: 'resolved',
+        resolvedAt: Date.now(),
+        resolvedBy: event.source?.userId || null,
+    });
+
     const sent = await replyOrPush(
         event,
         `✅ [อัปเดตสถานะ]\nFeedback ${ticketLabel} ได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${getBangkokTimeLabel()}`
