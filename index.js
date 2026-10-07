@@ -268,7 +268,8 @@ async function markTicketResolved(ticketId) {
 // 💾 Feedback Persistence: เก็บข้อมูล Feedback ลง Redis อัตโนมัติ (fallback เป็น In-Memory)
 // ---------------------------------------------------------------------------
 // เก็บข้อมูลกี่วัน (มีชื่อ/เบอร์โทรลูกค้า ควรกำหนดอายุเสมอ) ปรับด้วย env FEEDBACK_RETENTION_DAYS
-const FEEDBACK_TTL_SEC = (Number(process.env.FEEDBACK_RETENTION_DAYS) || 365) * 60 * 60 * 24;
+// ค่าเริ่มต้น 400 วัน (> 1 ปี) เพื่อให้ยังมีข้อมูลของ 1 ม.ค. เหลืออยู่ตอนสรุปประจำปีรันในวันที่ 1 ม.ค. ปีถัดไป
+const FEEDBACK_TTL_SEC = (Number(process.env.FEEDBACK_RETENTION_DAYS) || 400) * 60 * 60 * 24;
 const FEEDBACK_INDEX_KEY = 'feedback:index'; // sorted set: score = เวลาที่สร้าง (ms), member = ticketId
 const feedbackKey = (ticketId) => `feedback:ticket:${ticketId}`;
 
@@ -982,6 +983,289 @@ app.post(
         return res.status(200).send('OK');
     }
 );
+
+// ---------------------------------------------------------------------------
+// 📊 สรุป Feedback ประจำปี (เรียกโดย Vercel Cron ตอนขึ้นปีใหม่ตามเวลาไทย)
+//    - สรุปเนื้อหา Feedback เต็มทุกรายการ ไม่ตัดคำ
+//    - ถ้าใส่ใน LINE ได้ครบทุกคำ → ส่ง LINE เสมอ
+//    - ถ้า LINE ใส่ไม่ครบ (จำกัด 5 ข้อความ x 5,000 ตัวอักษร) หรือ LINE ส่งไม่ได้ → ส่ง Telegram แทน
+// ---------------------------------------------------------------------------
+const LINE_CHUNK_MAX_CHARS = 4500;     // LINE จำกัดข้อความละ 5000 ตัวอักษร เผื่อที่ไว้สำหรับหัวข้อ/หมายเหตุ
+const LINE_MAX_MESSAGES = 5;           // LINE จำกัด push ครั้งละไม่เกิน 5 ข้อความ (ข้อความที่ 1 = สรุปยอด)
+const TELEGRAM_CHUNK_MAX_CHARS = 4000; // Telegram จำกัดข้อความละ 4096 ตัวอักษร
+const TELEGRAM_MAX_MESSAGES = 15;      // เกินนี้จะส่งเป็นไฟล์ .txt แทน (กลุ่ม Telegram จำกัดราว 20 ข้อความ/นาที)
+const SUMMARY_SENT_TTL_SEC = 60 * 60 * 24 * 800;
+
+/** ช่วงเวลาของปี ค.ศ. นั้นตามเวลาไทย (UTC+7) เป็น millisecond */
+function bangkokYearRangeMs(year) {
+    const offset = 7 * 60 * 60 * 1000;
+    return { start: Date.UTC(year, 0, 1) - offset, end: Date.UTC(year + 1, 0, 1) - offset - 1 };
+}
+
+async function loadYearFeedback(year) {
+    const { start, end } = bangkokYearRangeMs(year);
+    const ids = await redisCommand(['ZRANGEBYSCORE', FEEDBACK_INDEX_KEY, start, end]);
+    const records = [];
+    for (let i = 0; i < ids.length; i += 100) {
+        const raws = await redisCommand(['MGET', ...ids.slice(i, i + 100).map(feedbackKey)]);
+        for (const raw of raws) {
+            if (!raw) continue; // หมดอายุไปแล้ว
+            try { records.push(JSON.parse(raw)); } catch { /* ข้าม record ที่เสียหาย */ }
+        }
+    }
+    return records; // เรียงตามเวลาที่สร้างอยู่แล้ว (จาก sorted set)
+}
+
+const summaryDateFormat = new Intl.DateTimeFormat('th-TH', {
+    timeZone: 'Asia/Bangkok', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false
+});
+
+/** 1 รายการ = เลข Ticket + วันเวลา + สถานะ + ผู้ส่ง + ข้อความเต็ม (ไม่ตัดคำ) */
+function formatSummaryEntry(r) {
+    const status = r.status === 'resolved' ? '✅ แก้ไขแล้ว' : '⏳ ยังไม่ได้กดแก้ไข';
+    const who = `${r.name || 'ไม่ระบุชื่อ'} (${r.phone || 'ไม่ระบุเบอร์โทร'})`;
+    return `#${r.seq} • ${summaryDateFormat.format(new Date(r.createdAt))} • ${status}\n👤 ${who}\n💬 ${r.text}`;
+}
+
+/**
+ * แบ่งบล็อกเป็นก้อนไม่เกิน maxChars และไม่เกิน maxChunks ก้อน (นับเป็น UTF-16 เหมือน JS .length ซึ่งปลอดภัยไว้ก่อน)
+ * บล็อกที่เหลือเกินจะนับเป็น omitted
+ */
+function chunkBlocks(blocks, maxChars, maxChunks, sep = '\n\n') {
+    // กันกรณีบล็อกเดียวยาวเกินขีดจำกัด (ปกติไม่เกิดขึ้น) โดยหั่นเป็นชิ้นแทนการตัดทิ้ง
+    const items = blocks.flatMap((b) => {
+        const parts = [];
+        for (let i = 0; i < b.length; i += maxChars) parts.push(b.slice(i, i + maxChars));
+        return parts.length ? parts : [''];
+    });
+
+    const chunks = [];
+    let i = 0;
+    while (i < items.length && chunks.length < maxChunks) {
+        let cur = '';
+        while (i < items.length && (cur ? cur.length + sep.length : 0) + items[i].length <= maxChars) {
+            cur += (cur ? sep : '') + items[i];
+            i++;
+        }
+        chunks.push(cur);
+    }
+    return { chunks, omitted: items.length - i };
+}
+
+function buildYearlySummaryParts(year, totalIssued, records) {
+    let resolved = 0, pending = 0, failed = 0, telegram = 0;
+    const delivered = [];
+    for (const r of records) {
+        if (r.status === 'failed') { failed++; continue; }
+        delivered.push(r);
+        if (r.status === 'resolved') resolved++; else pending++;
+        if (r.deliveredVia === 'telegram') telegram++;
+    }
+
+    const total = Math.max(totalIssued, delivered.length);
+    const headLines = [
+        `📊 สรุป Feedback ประจำปี ${year}`,
+        'Cinema • สาขากาฬสินธุ์',
+        '──────────────',
+        `📬 รวมทั้งปี: ${total} ครั้ง`,
+        `✅ แก้ไขแล้ว: ${resolved}`,
+        `⏳ ยังไม่ได้กดแก้ไข: ${pending}`,
+    ];
+    if (telegram > 0) headLines.push(`📨 ส่งผ่าน Telegram: ${telegram}`);
+    if (failed > 0) headLines.push(`⚠️ ส่งไม่สำเร็จ (เก็บข้อความไว้ ไม่นับในเลขลำดับ): ${failed}`);
+    if (delivered.length < total) {
+        headLines.push(`ℹ️ มีรายละเอียดเก็บไว้ ${delivered.length} จาก ${total} รายการ (ที่เหลือเป็นช่วงก่อนเปิดระบบเก็บข้อมูล)`);
+    }
+    headLines.push(`🔄 ปี ${year + 1} เลขลำดับจะเริ่มที่ #1 ใหม่`);
+
+    return {
+        head: headLines.join('\n'),
+        listHeader: delivered.length ? `📋 รายการ Feedback ปี ${year} ทั้งหมด (เรียงตามเวลา)` : '',
+        entries: delivered.map(formatSummaryEntry),
+        total,
+        stats: { resolved, pending, failed, telegram, stored: records.length },
+    };
+}
+
+/** วางแผนส่ง LINE: คืน messages และจำนวนรายการที่ใส่ไม่ได้ (omitted = 0 แปลว่าครบทุกคำ) */
+function planLineMessages({ head, listHeader, entries }) {
+    const { chunks, omitted } = chunkBlocks(entries, LINE_CHUNK_MAX_CHARS, LINE_MAX_MESSAGES - 1);
+    if (chunks.length) chunks[0] = `${listHeader}\n\n${chunks[0]}`;
+    return { messages: [head, ...chunks], omitted };
+}
+
+/** ส่งหลายข้อความใน push เดียว (ไม่เกิน 5) ใช้ Retry Key เดียวกันทั้งสองรอบ จึงไม่ส่งซ้ำ */
+async function sendLinePushTexts(texts) {
+    const channelToken = env('LINE_CHANNEL_ACCESS_TOKEN');
+    const targetId = env('LINE_TARGET_ID');
+    if (!channelToken || !targetId) {
+        console.error('❌ Missing LINE API Token or Target ID in environment variables');
+        return { ok: false, quotaExceeded: false };
+    }
+
+    const retryKey = crypto.randomUUID();
+    const body = JSON.stringify({ to: targetId, messages: texts.map((text) => ({ type: 'text', text })) });
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+            const response = await fetchWithTimeout('https://api.line.me/v2/bot/message/push', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${channelToken}`,
+                    'X-Line-Retry-Key': retryKey
+                },
+                body
+            });
+            if (response.ok || response.status === 409) return { ok: true, quotaExceeded: false };
+
+            const errBody = (await response.text()).slice(0, 500);
+            console.error(`❌ LINE yearly summary rejected (HTTP ${response.status}):`, errBody);
+            if (response.status === 429 && /monthly limit/i.test(errBody)) return { ok: false, quotaExceeded: true };
+            if (response.status < 500 && response.status !== 429) return { ok: false, quotaExceeded: false };
+        } catch (err) {
+            console.error('❌ Network Error while sending LINE yearly summary:', err.message);
+        }
+        if (attempt < 2) await sleep(500);
+    }
+    return { ok: false, quotaExceeded: false };
+}
+
+async function telegramSendMessage(text) {
+    const response = await fetchWithTimeout(`https://api.telegram.org/bot${env('TELEGRAM_BOT_TOKEN')}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: env('TELEGRAM_CHAT_ID'), text, disable_web_page_preview: true })
+    });
+    if (!response.ok) throw new Error(`Telegram sendMessage HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`);
+}
+
+async function telegramSendDocument(filename, content, caption) {
+    const form = new FormData();
+    form.append('chat_id', env('TELEGRAM_CHAT_ID'));
+    if (caption) form.append('caption', caption.slice(0, 1000));
+    form.append('document', new Blob([content], { type: 'text/plain; charset=utf-8' }), filename);
+    const response = await fetchWithTimeout(`https://api.telegram.org/bot${env('TELEGRAM_BOT_TOKEN')}/sendDocument`, {
+        method: 'POST',
+        body: form
+    }, 30000);
+    if (!response.ok) throw new Error(`Telegram sendDocument HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`);
+}
+
+/**
+ * ส่งสรุปเต็มทุกคำไป Telegram
+ * - พอดีใน 15 ข้อความ → ส่งเป็นข้อความ (ข้อความแรก = สรุปยอด)
+ * - เกินกว่านั้น → ส่งสรุปยอดเป็นข้อความ + รายการทั้งหมดเป็นไฟล์ .txt
+ * @returns {Promise<'messages'|'document'|null>} null = ส่งไม่สำเร็จ/ไม่ได้ตั้งค่า
+ */
+async function sendYearlySummaryToTelegram(year, { head, listHeader, entries }) {
+    if (!env('TELEGRAM_BOT_TOKEN') || !env('TELEGRAM_CHAT_ID')) {
+        console.warn('⚠️ Telegram not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)');
+        return null;
+    }
+
+    try {
+        const { chunks } = chunkBlocks(entries, TELEGRAM_CHUNK_MAX_CHARS, Infinity);
+        if (chunks.length) chunks[0] = `${listHeader}\n\n${chunks[0]}`;
+
+        if (1 + chunks.length <= TELEGRAM_MAX_MESSAGES) {
+            for (const text of [head, ...chunks]) await telegramSendMessage(text);
+            return 'messages';
+        }
+
+        await telegramSendMessage(`${head}\n\n📎 รายการ Feedback ทั้งหมดอยู่ในไฟล์แนบ (มากเกินกว่าจะส่งเป็นข้อความ)`);
+        await telegramSendDocument(`feedback-${year}.txt`, `${head}\n\n${listHeader}\n\n${entries.join('\n\n')}\n`, `Feedback ประจำปี ${year} ทั้งหมด`);
+        return 'document';
+    } catch (err) {
+        console.error('❌ Telegram yearly summary failed:', err.message);
+        return null;
+    }
+}
+
+/**
+ * ส่งสรุปประจำปี — ส่งซ้ำไม่ได้ถ้าเคยส่งสำเร็จแล้ว เว้นแต่ force
+ *  1) ถ้า LINE ใส่ได้ครบทุกคำ → ส่ง LINE ก่อนเสมอ (ถ้า LINE ส่งไม่สำเร็จ → ลอง Telegram)
+ *  2) ถ้า LINE ใส่ไม่ครบ → ส่ง Telegram ฉบับเต็มแทน
+ *  3) ถ้า Telegram ใช้ไม่ได้ในกรณี 2 → ส่ง LINE ฉบับตัด (มีหมายเหตุบอกจำนวนที่ไม่ได้แสดง) ดีกว่าไม่ส่งเลย
+ * หมายเหตุ: ตัวนับเลข Ticket เก็บแยกตามปี (feedback:ticket_counter:<ปี>) ปีใหม่จึงเริ่มที่ 0 เองโดยไม่ต้องลบอะไร
+ */
+async function sendYearlySummary(year, { force = false } = {}) {
+    const sentKey = `feedback:yearly_summary_sent:${year}`;
+    if (!force && await redisCommand(['GET', sentKey])) return { status: 'already_sent' };
+
+    const [records, counterRaw] = await Promise.all([
+        loadYearFeedback(year),
+        redisCommand(['GET', `feedback:ticket_counter:${year}`]),
+    ]);
+    const parts = buildYearlySummaryParts(year, Number(counterRaw) || 0, records);
+    const linePlan = planLineMessages(parts);
+    const fitsInLine = linePlan.omitted === 0;
+
+    let via = null, delivery = null, truncated = 0;
+
+    if (fitsInLine) {
+        const line = await sendLinePushTexts(linePlan.messages);
+        if (line.ok) { via = 'line'; delivery = 'messages'; }
+    }
+
+    if (!via) {
+        const tg = await sendYearlySummaryToTelegram(year, parts);
+        if (tg) { via = 'telegram'; delivery = tg; }
+    }
+
+    if (!via && !fitsInLine) {
+        // Telegram ใช้ไม่ได้ และ LINE ใส่ไม่ครบ: ส่ง LINE ฉบับตัดดีกว่าไม่ส่งเลย พร้อมบอกชัดว่าไม่ครบ
+        const messages = [...linePlan.messages];
+        messages[messages.length - 1] += `\n\n… และอีก ${linePlan.omitted} รายการ ไม่ได้แสดง (LINE จำกัดจำนวนข้อความ และส่งไป Telegram ไม่สำเร็จ)`;
+        const line = await sendLinePushTexts(messages);
+        if (line.ok) { via = 'line'; delivery = 'truncated'; truncated = linePlan.omitted; }
+    }
+
+    if (!via) return { status: 'send_failed' };
+
+    await redisCommand(['SET', sentKey, JSON.stringify({ at: Date.now(), via, delivery }), 'EX', SUMMARY_SENT_TTL_SEC]);
+    return {
+        status: 'sent', via, delivery, year, total: parts.total, entries: parts.entries.length,
+        lineMessages: via === 'line' ? linePlan.messages.length : undefined, truncated, ...parts.stats,
+    };
+}
+
+/**
+ * Endpoint สำหรับ Vercel Cron (ส่ง GET พร้อม Authorization: Bearer <CRON_SECRET> ให้อัตโนมัติ)
+ * ?year=2026  สรุปปีที่ระบุ (ค่าเริ่มต้น = ปีที่แล้วตามเวลาไทย)   ?force=1  ส่งซ้ำแม้เคยส่งแล้ว
+ */
+app.get('/api/cron/yearly-summary', async (req, res) => {
+    const secret = env('CRON_SECRET');
+    if (!secret) {
+        console.error('❌ CRON_SECRET is not set — yearly summary endpoint disabled');
+        return res.status(503).json({ error: 'CRON_SECRET is not configured' });
+    }
+    const provided = Buffer.from(String(req.headers.authorization || ''));
+    const expected = Buffer.from(`Bearer ${secret}`);
+    if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    if (!redisEnabled()) {
+        return res.status(503).json({ error: 'Redis is required for the yearly summary' });
+    }
+
+    const currentYear = getBangkokYear();
+    const year = req.query?.year ? Number(req.query.year) : currentYear - 1;
+    if (!Number.isInteger(year) || year < 2000 || year > currentYear) {
+        return res.status(400).json({ error: 'Invalid year' });
+    }
+
+    try {
+        const result = await sendYearlySummary(year, { force: req.query?.force === '1' });
+        const code = result.status === 'send_failed' ? 502 : 200;
+        console.log(`📊 Yearly summary ${year}:`, JSON.stringify(result));
+        return res.status(code).json(result);
+    } catch (err) {
+        console.error('❌ Yearly summary error:', err.message);
+        return res.status(500).json({ error: 'Yearly summary failed' });
+    }
+});
 
 // ---------------------------------------------------------------------------
 // 🚧 404 & Global Error Handler
