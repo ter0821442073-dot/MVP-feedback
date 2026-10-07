@@ -674,48 +674,87 @@ async function handleTextMessage(event) {
     await sendLineReply(event.replyToken, `📌 Group ID ของกลุ่มนี้คือ:\n${groupId}`);
 }
 
-app.post(
-    '/api/webhook',
-    express.json({ limit: '256kb', verify: saveRawBody }),
-    verifyLineSignature,
-    async (req, res) => {
-        const events = Array.isArray(req.body?.events) ? req.body.events : [];
+// Endpoint สำหรับ Webhook LINE
+app.post('/api/webhook', verifyLineSignature, async (req, res) => {
+    try {
+        const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN?.trim();
+        const events = req.body.events || [];
 
         for (const event of events) {
-            try {
-                if (event.type === 'postback') {
-                    await handlePostback(event);
-                } else if (event.type === 'message' && event.message?.type === 'text') {
-                    await handleTextMessage(event);
+            if (event.type === 'postback') {
+                const replyToken = event.replyToken;
+                
+                let ticketId = null;
+                let feedbackText = '';
+
+                try {
+                    const postbackData = new URLSearchParams(event.postback.data);
+                    ticketId = postbackData.get('ticket_id');
+                    feedbackText = postbackData.get('feedback_text') || '';
+                } catch (e) {
+                    console.error('❌ Error parsing postback data:', e.message);
                 }
-            } catch (err) {
-                // error ใน event หนึ่งต้องไม่ทำให้ event อื่นหยุดทำงาน
-                console.error('❌ Webhook event error:', err.message);
+
+                if (replyToken && channelToken) {
+                    let updateMessage = '';
+
+                    if (ticketId && resolvedTickets.has(ticketId)) {
+                        updateMessage = `⚠ [แจ้งเตือน]\nFeedback นี้ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`;
+                    } else {
+                        if (ticketId) {
+                            resolvedTickets.add(ticketId);
+                        }
+                        const now = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' });
+                        
+                        let decodedText = feedbackText;
+                        try {
+                            decodedText = decodeURIComponent(feedbackText);
+                        } catch (e) { /* ignore decode error */ }
+
+                        updateMessage = `✅ [อัปเดตสถานะ]\nFeedback: "${decodedText}"\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${now} น.`;
+                    }
+
+                    await fetch('https://api.line.me/v2/bot/message/reply', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${channelToken}`
+                        },
+                        body: JSON.stringify({
+                            replyToken: replyToken,
+                            messages: [{
+                                type: 'text',
+                                text: updateMessage
+                            }]
+                        })
+                    });
+                }
+            }
+
+            if (event.type === 'message' && event.message.type === 'text') {
+                const groupId = event.source.groupId;
+                const replyToken = event.replyToken;
+                
+                if (groupId && replyToken && event.message.text.toLowerCase().trim() === 'id' && channelToken) {
+                    await fetch('https://api.line.me/v2/bot/message/reply', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${channelToken}`
+                        },
+                        body: JSON.stringify({
+                            replyToken: replyToken,
+                            messages: [{ type: 'text', text: `📌 Group ID ของกลุ่มนี้คือ:\n${groupId}` }]
+                        })
+                    });
+                }
             }
         }
-
-        // ตอบ 200 เสมอ เพื่อไม่ให้ LINE ส่ง event เดิมซ้ำ
+        return res.status(200).send('OK');
+    } catch (err) {
+        console.error('❌ Webhook Error:', err.message);
         return res.status(200).send('OK');
     }
-);
-
-// ---------------------------------------------------------------------------
-// 🚧 404 & Global Error Handler
-// ---------------------------------------------------------------------------
-app.use((req, res) => {
-    res.status(404).json({ error: 'Not found' });
-});
-
-// eslint-disable-next-line no-unused-vars
-app.use((err, req, res, next) => {
-    if (err.type === 'entity.too.large') {
-        return res.status(413).json({ error: 'ข้อมูลที่ส่งมีขนาดใหญ่เกินไป' });
-    }
-    if (err.type === 'entity.parse.failed' || err instanceof SyntaxError) {
-        return res.status(400).json({ error: 'รูปแบบข้อมูลไม่ถูกต้อง' });
-    }
-    console.error('❌ Unhandled error:', err.message);
-    res.status(500).json({ error: 'เกิดข้อผิดพลาดภายในระบบ' });
 });
 
 export default app;
