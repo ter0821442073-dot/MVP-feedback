@@ -602,77 +602,171 @@ app.post(
     }
 );
 
-// ---------------------------------------------------------------------------
-// 🤖 Endpoint: LINE Webhook
-// ---------------------------------------------------------------------------
-async function handlePostback(event) {
-    const targetId = env('LINE_TARGET_ID');
+/**
+ * ฟังก์ชันส่ง LINE Push Alert ด้วย Flex Message (ตัดการแสดงผล AI ออกแล้ว)
+ */
+async function sendLinePushAlert(customerText, name, phone, formattedDate) {
+    const channelToken = process.env.LINE_CHANNEL_ACCESS_TOKEN?.trim();
+    const targetId = process.env.LINE_TARGET_ID?.trim();
 
-    // 🔒 รับเฉพาะ Postback ที่มาจากกลุ่ม/ห้องเป้าหมายของระบบเท่านั้น
-    const sourceId = event.source?.groupId || event.source?.roomId || event.source?.userId;
-    if (targetId && sourceId !== targetId) {
-        console.warn('⚠️ Ignored postback from non-target source');
-        return;
+    if (!channelToken || !targetId) {
+        console.error('❌ Missing LINE API Token or Target ID in environment variables');
+        return false;
     }
 
-    let params;
+    const customerInfo = `${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`;
+    
+    // สุ่มสร้าง Ticket ID
+    const ticketId = `${Date.now().toString().slice(-6)}${Math.floor(Math.random() * 10)}`;
+
+    // ตัดความยาวข้อความสำหรับ altText (LINE จำกัดที่ 400 ตัวอักษร)
+    const shortAltText = customerText.length > 50 ? customerText.substring(0, 50) + '...' : customerText;
+
+    // ตัดความยาวข้อความสำหรับ Postback Data (LINE จำกัด postback data ที่ 300 ตัวอักษร)
+    const shortFeedbackForData = customerText.length > 80 ? customerText.substring(0, 80) + '...' : customerText;
+
+    const flexPayload = {
+        type: "flex",
+        altText: `📬 Feedback ใหม่: ${shortAltText}`,
+        contents: {
+            type: "bubble",
+            header: {
+                type: "box",
+                layout: "vertical",
+                contents: [
+                    {
+                        type: "text",
+                        text: `📢 แจ้งเตือน Feedback`,
+                        weight: "bold",
+                        color: "#ffffff",
+                        size: "md"
+                    },
+                    {
+                        type: "text",
+                        text: "Cinema • สาขากาฬสินธุ์",
+                        color: "#ffffffcc",
+                        size: "xs",
+                        margin: "xs"
+                    }
+                ],
+                backgroundColor: "#03C755",
+                paddingAll: "md"
+            },
+            body: {
+                type: "box",
+                layout: "vertical",
+                contents: [
+                    {
+                        type: "box",
+                        layout: "horizontal",
+                        contents: [
+                            { type: "text", text: "👤 ผู้ส่ง:", size: "xs", color: "#8c8c8c", flex: 2 },
+                            { type: "text", text: customerInfo, size: "xs", color: "#111111", weight: "bold", flex: 5, wrap: true }
+                        ]
+                    },
+                    {
+                        type: "box",
+                        layout: "horizontal",
+                        contents: [
+                            { type: "text", text: "📅 เวลา:", size: "xs", color: "#8c8c8c", flex: 2 },
+                            { type: "text", text: formattedDate, size: "xs", color: "#111111", flex: 5 }
+                        ],
+                        margin: "xs"
+                    },
+                    { type: "separator", margin: "md" },
+                    {
+                        type: "box",
+                        layout: "vertical",
+                        contents: [
+                            { type: "text", text: "💬 ข้อความที่ได้รับ:", size: "xs", color: "#8c8c8c" },
+                            { type: "text", text: `"${customerText}"`, size: "lg", color: "#111111", weight: "bold", wrap: true, margin: "xs" }
+                        ],
+                        margin: "md",
+                        backgroundColor: "#f8f9fa",
+                        paddingAll: "md",
+                        cornerRadius: "md"
+                    }
+                ]
+            },
+            footer: {
+                type: "box",
+                layout: "vertical",
+                contents: [
+                    {
+                        type: "button",
+                        action: {
+                            type: "postback",
+                            label: "☑ ทำการแก้ไขแล้ว",
+                            data: `action=resolve&ticket_id=${ticketId}&feedback_text=${encodeURIComponent(shortFeedbackForData)}`,
+                            displayText: `รับทราบ/ทำการแก้ไข Feedback เรียบร้อยแล้ว`
+                        },
+                        style: "primary",
+                        color: "#007bff",
+                        height: "sm"
+                    }
+                ]
+            }
+        }
+    };
+
     try {
-        params = new URLSearchParams(event.postback?.data || '');
-    } catch (e) {
-        console.error('❌ Error parsing postback data:', e.message);
-        return;
+        const response = await fetch('https://api.line.me/v2/bot/message/push', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${channelToken}`
+            },
+            body: JSON.stringify({
+                to: targetId,
+                messages: [flexPayload]
+            })
+        });
+
+        if (!response.ok) {
+            const errBody = await response.text();
+            console.error('❌ LINE API Rejected Push:', errBody);
+            return false;
+        }
+
+        return true;
+    } catch (err) {
+        console.error('❌ Network Error while sending LINE Push Alert:', err.message);
+        return false;
     }
+}
 
-    const action = params.get('action');
-    const ticketId = params.get('ticket_id');
-    const seq = params.get('seq');
-    const fbText = params.get('text') || 'ไม่ระบุ'; // ดึงข้อความออกมาจาก postback
-
-    if (action !== 'resolve' || !ticketId || !UUID_REGEX.test(ticketId)) return;
-
-    const isFirstResolve = await markTicketResolved(ticketId);
-
-    if (!isFirstResolve) {
-        console.log(`⚠️ Ticket ID: ${ticketId} ถูกแก้ไขไปแล้ว (ข้ามการประมวลผล)`);
+// Endpoint รับข้อมูล Feedback
+app.post('/api/feedback', async (req, res) => {
+    try {
+        const { text, name, phone } = req.body;
         
-        // ตอบกลับเมื่อเคยถูกแก้ไขไปแล้ว
-        await sendLineReply(
-            event.replyToken, 
-            `⚠️ [แจ้งเตือน]\nFeedback นี้ได้รับการตรวจสอบ/แก้ไขไปแล้วก่อนหน้านี้ครับ`
-        );
-        return;
+        if (!text || typeof text !== 'string' || !text.trim()) {
+            return res.status(400).json({ error: 'กรุณากรอกข้อความ Feedback ให้ถูกต้อง' });
+        }
+
+        // 🔒 ทำการ Sanitize ข้อมูลเพื่อป้องกัน XSS
+        const sanitizedText = sanitizeInput(text);
+        const sanitizedName = sanitizeInput(name);
+        const sanitizedPhone = sanitizeInput(phone);
+
+        const now = new Date();
+        const formattedDate = now.toLocaleString('th-TH', {
+            timeZone: 'Asia/Bangkok',
+            year: 'numeric', month: 'short', day: 'numeric',
+            hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+        }) + ' น.';
+
+        const lineSuccess = await sendLinePushAlert(sanitizedText, sanitizedName, sanitizedPhone, formattedDate);
+
+        return res.json({ 
+            success: true, 
+            line_sent: lineSuccess 
+        });
+    } catch (error) {
+        console.error('❌ Error inside /api/feedback:', error.message);
+        return res.status(500).json({ error: 'เกิดข้อผิดพลาดภายในระบบ' });
     }
-
-    console.log(`✅ บันทึกการแก้ไข Ticket ID: ${ticketId} (#${seq || '?'}) สำเร็จ`);
-
-    // เวลาปัจจุบันที่แก้ไขสำเร็จ (ดึงเวลาตอนที่สตาฟกดปุ่ม)
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString('th-TH', {
-        timeZone: 'Asia/Bangkok',
-        hour: '2-digit', minute: '2-digit'
-    }) + ' น.';
-
-    // ตอบกลับครั้งแรกที่บันทึกสำเร็จ
-    await sendLineReply(
-        event.replyToken, 
-        `✅ [อัปเดตสถานะ]\nFeedback: "${fbText}"\nได้รับการตรวจสอบ/แก้ไขเรียบร้อยแล้ว เมื่อเวลา ${timeStr}`
-    );
-}
-
-async function handleTextMessage(event) {
-    const groupId = event.source?.groupId;
-    const text = event.message?.text;
-
-    if (!groupId || !event.replyToken || typeof text !== 'string') return;
-    if (text.toLowerCase().trim() !== 'id') return;
-
-    // คำสั่ง "id" ใช้สำหรับตั้งค่าครั้งแรก — ปิดอัตโนมัติเมื่อมี LINE_TARGET_ID แล้ว
-    // (หากต้องการเปิดต่อ ให้ตั้ง ENABLE_ID_COMMAND=true)
-    const idCommandEnabled = !env('LINE_TARGET_ID') || env('ENABLE_ID_COMMAND') === 'true';
-    if (!idCommandEnabled) return;
-
-    await sendLineReply(event.replyToken, `📌 Group ID ของกลุ่มนี้คือ:\n${groupId}`);
-}
+});
 
 // Endpoint สำหรับ Webhook LINE
 app.post('/api/webhook', verifyLineSignature, async (req, res) => {
