@@ -343,7 +343,7 @@ async function updateFeedbackRecord(ticketId, patch) {
         }
         if (!record) record = feedbackMemory.get(ticketId) || null;
         if (!record) {
-            console.warn(`⚠️ updateFeedbackRecord: ไม่พบ record ของ ${ticketId} (อาจหมดอายุ หรือเป็น ticket เก่าก่อนเปิดใช้ระบบเก็บข้อมูล)`);
+            console.warn(`⚠️ updateFeedbackRecord: ไม่พบ record ของ ${ticketId} (อาจหมดอายุ ถูกลบหลังสรุปประจำปี หรือเป็น ticket เก่าก่อนเปิดใช้ระบบเก็บข้อมูล)`);
             return false;
         }
 
@@ -985,16 +985,21 @@ app.post(
 );
 
 // ---------------------------------------------------------------------------
-// 📊 สรุป Feedback ประจำปี (เรียกโดย Vercel Cron ตอนขึ้นปีใหม่ตามเวลาไทย)
+// 📊 สรุป Feedback ประจำปี + 🧹 ลบข้อมูลของปีนั้นหลังส่งครบ
+//    (เรียกโดย Vercel Cron ตอนขึ้นปีใหม่ตามเวลาไทย)
 //    - สรุปเนื้อหา Feedback เต็มทุกรายการ ไม่ตัดคำ
 //    - ถ้าใส่ใน LINE ได้ครบทุกคำ → ส่ง LINE เสมอ
 //    - ถ้า LINE ใส่ไม่ครบ (จำกัด 5 ข้อความ x 5,000 ตัวอักษร) หรือ LINE ส่งไม่ได้ → ส่ง Telegram แทน
+//    - ลบข้อมูลเฉพาะเมื่อส่งครบทุกรายการสำเร็จแล้วเท่านั้น
 // ---------------------------------------------------------------------------
 const LINE_CHUNK_MAX_CHARS = 4500;     // LINE จำกัดข้อความละ 5000 ตัวอักษร เผื่อที่ไว้สำหรับหัวข้อ/หมายเหตุ
 const LINE_MAX_MESSAGES = 5;           // LINE จำกัด push ครั้งละไม่เกิน 5 ข้อความ (ข้อความที่ 1 = สรุปยอด)
 const TELEGRAM_CHUNK_MAX_CHARS = 4000; // Telegram จำกัดข้อความละ 4096 ตัวอักษร
 const TELEGRAM_MAX_MESSAGES = 15;      // เกินนี้จะส่งเป็นไฟล์ .txt แทน (กลุ่ม Telegram จำกัดราว 20 ข้อความ/นาที)
 const SUMMARY_SENT_TTL_SEC = 60 * 60 * 24 * 800;
+
+// ตั้ง PURGE_AFTER_SUMMARY=false ถ้าต้องการปิดการลบอัตโนมัติ (ค่าเริ่มต้น = เปิด)
+const PURGE_ENABLED = env('PURGE_AFTER_SUMMARY') !== 'false';
 
 /** ช่วงเวลาของปี ค.ศ. นั้นตามเวลาไทย (UTC+7) เป็น millisecond */
 function bangkokYearRangeMs(year) {
@@ -1014,6 +1019,46 @@ async function loadYearFeedback(year) {
         }
     }
     return records; // เรียงตามเวลาที่สร้างอยู่แล้ว (จาก sorted set)
+}
+
+/**
+ * ลบข้อมูลของปีนั้นออกจาก Redis (เรียกหลังส่งสรุปครบแล้วเท่านั้น)
+ * - ไม่ลบ record ที่สถานะ failed เพราะข้อความเหล่านั้นไม่เคยถูกส่งถึงใคร (ไม่อยู่ในสรุป) ปล่อยให้หมดอายุเองตาม TTL
+ * - ไม่แตะข้อมูลของปีใหม่ (counter ปีใหม่, record ที่เพิ่งเข้ามา) และไม่ลบ key "yearly_summary_sent"
+ */
+async function purgeYearData(year, records) {
+    const deletable = records.filter((r) => r.status !== 'failed');
+
+    for (let i = 0; i < deletable.length; i += 100) {
+        const batch = deletable.slice(i, i + 100);
+        const keys = batch.flatMap((r) => [
+            feedbackKey(r.ticketId),
+            `feedback:resolved:${r.ticketId}`,
+            ...(r.seq ? [`feedback:seq:${r.year ?? year}:${r.seq}`] : []),
+        ]);
+        await redisPipeline([
+            ['DEL', ...keys],
+            ['ZREM', FEEDBACK_INDEX_KEY, ...batch.map((r) => r.ticketId)],
+        ]);
+    }
+
+    await redisCommand(['DEL', `feedback:ticket_counter:${year}`, `feedback:last_line:${year}`]);
+    for (const r of deletable) feedbackMemory.delete(r.ticketId);
+
+    return { purged: deletable.length, keptFailed: records.length - deletable.length };
+}
+
+/** ลบแล้วบันทึกลงใน sent marker ว่าลบเสร็จ (ไม่ throw) */
+async function purgeAndMark(year, sentKey, sentInfo, records) {
+    try {
+        const result = await purgeYearData(year, records);
+        await redisCommand(['SET', sentKey, JSON.stringify({ ...sentInfo, purgedAt: Date.now(), ...result }), 'EX', SUMMARY_SENT_TTL_SEC]);
+        return result;
+    } catch (err) {
+        // ลบไม่สำเร็จ: ไม่เป็นไร รอบหน้าของ Cron จะลองลบใหม่โดยไม่ส่งสรุปซ้ำ
+        console.error('❌ Purge failed (will retry on next cron run):', err.message);
+        return { purged: 0, purgeError: err.message };
+    }
 }
 
 const summaryDateFormat = new Intl.DateTimeFormat('th-TH', {
@@ -1183,15 +1228,36 @@ async function sendYearlySummaryToTelegram(year, { head, listHeader, entries }) 
 }
 
 /**
- * ส่งสรุปประจำปี — ส่งซ้ำไม่ได้ถ้าเคยส่งสำเร็จแล้ว เว้นแต่ force
+ * ส่งสรุปประจำปี แล้วลบข้อมูลของปีนั้น — ส่งซ้ำไม่ได้ถ้าเคยส่งสำเร็จแล้ว เว้นแต่ force
  *  1) ถ้า LINE ใส่ได้ครบทุกคำ → ส่ง LINE ก่อนเสมอ (ถ้า LINE ส่งไม่สำเร็จ → ลอง Telegram)
  *  2) ถ้า LINE ใส่ไม่ครบ → ส่ง Telegram ฉบับเต็มแทน
  *  3) ถ้า Telegram ใช้ไม่ได้ในกรณี 2 → ส่ง LINE ฉบับตัด (มีหมายเหตุบอกจำนวนที่ไม่ได้แสดง) ดีกว่าไม่ส่งเลย
+ *     แต่กรณีนี้ "ไม่ลบข้อมูล" เพราะยังส่งไม่ครบ
+ *  4) ลบข้อมูลเฉพาะเมื่อส่งครบทุกรายการสำเร็จแล้วเท่านั้น
  * หมายเหตุ: ตัวนับเลข Ticket เก็บแยกตามปี (feedback:ticket_counter:<ปี>) ปีใหม่จึงเริ่มที่ 0 เองโดยไม่ต้องลบอะไร
  */
 async function sendYearlySummary(year, { force = false } = {}) {
     const sentKey = `feedback:yearly_summary_sent:${year}`;
-    if (!force && await redisCommand(['GET', sentKey])) return { status: 'already_sent' };
+
+    // เคยส่งแล้ว?
+    const prevRaw = await redisCommand(['GET', sentKey]);
+    const prev = prevRaw ? JSON.parse(prevRaw) : null;
+
+    if (prev) {
+        if (prev.purgedAt) {
+            // ข้อมูลถูกลบไปแล้ว ห้าม force ส่งซ้ำ เพราะจะได้สรุปว่างเปล่า
+            return { status: force ? 'already_purged' : 'already_sent', purgedAt: prev.purgedAt };
+        }
+        if (!force) {
+            // ส่งครบแล้วแต่ครั้งก่อนลบไม่เสร็จ → ลบต่อ โดยไม่ส่งสรุปซ้ำ
+            if (PURGE_ENABLED && prev.delivery !== 'truncated') {
+                const records = await loadYearFeedback(year);
+                const purge = await purgeAndMark(year, sentKey, prev, records);
+                return { status: 'already_sent', ...purge };
+            }
+            return { status: 'already_sent' };
+        }
+    }
 
     const [records, counterRaw] = await Promise.all([
         loadYearFeedback(year),
@@ -1223,16 +1289,24 @@ async function sendYearlySummary(year, { force = false } = {}) {
 
     if (!via) return { status: 'send_failed' };
 
-    await redisCommand(['SET', sentKey, JSON.stringify({ at: Date.now(), via, delivery }), 'EX', SUMMARY_SENT_TTL_SEC]);
+    const sentInfo = { at: Date.now(), via, delivery };
+    await redisCommand(['SET', sentKey, JSON.stringify(sentInfo), 'EX', SUMMARY_SENT_TTL_SEC]);
+
+    // 🧹 ลบข้อมูลเฉพาะเมื่อส่งครบทุกรายการแล้วเท่านั้น (ฉบับตัด 'truncated' = ยังส่งไม่ครบ ห้ามลบ)
+    let purge = { purged: 0, skipped: true };
+    if (PURGE_ENABLED && delivery !== 'truncated') {
+        purge = await purgeAndMark(year, sentKey, sentInfo, records);
+    }
+
     return {
         status: 'sent', via, delivery, year, total: parts.total, entries: parts.entries.length,
-        lineMessages: via === 'line' ? linePlan.messages.length : undefined, truncated, ...parts.stats,
+        lineMessages: via === 'line' ? linePlan.messages.length : undefined, truncated, ...parts.stats, ...purge,
     };
 }
 
 /**
  * Endpoint สำหรับ Vercel Cron (ส่ง GET พร้อม Authorization: Bearer <CRON_SECRET> ให้อัตโนมัติ)
- * ?year=2026  สรุปปีที่ระบุ (ค่าเริ่มต้น = ปีที่แล้วตามเวลาไทย)   ?force=1  ส่งซ้ำแม้เคยส่งแล้ว
+ * ?year=2026  สรุปปีที่ระบุ (ค่าเริ่มต้น = ปีที่แล้วตามเวลาไทย)   ?force=1  ส่งซ้ำแม้เคยส่งแล้ว (ถ้ายังไม่ถูกลบ)
  */
 app.get('/api/cron/yearly-summary', async (req, res) => {
     const secret = env('CRON_SECRET');

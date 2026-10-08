@@ -19,5 +19,9 @@
       "src": "/(.*)",
       "dest": "index.html"
     }
+  ],
+  "crons": [
+    { "path": "/api/cron/yearly-summary", "schedule": "0 17 31 12 *" },
+    { "path": "/api/cron/yearly-summary", "schedule": "0 17 1 1 *" }
   ]
 }
