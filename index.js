@@ -700,10 +700,11 @@ async function sendLinePushAlert(payloadData) {
 }
 
 /**
- * ส่งแจ้งเตือนสำรองไป Telegram (ใช้เฉพาะเมื่อโควต้าข้อความรายเดือนของ LINE หมดเท่านั้น)
+ * ส่งแจ้งเตือนสำรองไป Telegram (ใช้เมื่อส่งเข้า LINE ไม่สำเร็จไม่ว่าด้วยสาเหตุใด)
  * ต้องตั้ง TELEGRAM_BOT_TOKEN และ TELEGRAM_CHAT_ID
+ * @param {boolean} quotaExceeded true = โควต้า LINE รายเดือนหมด, false = LINE ล้มเหลวด้วยสาเหตุอื่น
  */
-async function sendTelegramAlert({ customerText, name, phone, formattedDate, ticketSeqNumber, lastLineTicket }) {
+async function sendTelegramAlert({ customerText, name, phone, formattedDate, ticketSeqNumber, lastLineTicket, quotaExceeded = false }) {
     const token = env('TELEGRAM_BOT_TOKEN');
     const chatId = env('TELEGRAM_CHAT_ID');
     if (!token || !chatId) {
@@ -723,7 +724,9 @@ async function sendTelegramAlert({ customerText, name, phone, formattedDate, tic
 
     const text = [
         `📢 Feedback ใหม่ #${ticketSeqNumber}`,
-        '⚠️ ส่งผ่าน Telegram เพราะโควต้า LINE รายเดือนเต็ม',
+        quotaExceeded
+            ? '⚠️ ส่งผ่าน Telegram เพราะโควต้า LINE รายเดือนเต็ม'
+            : '⚠️ ส่งผ่าน Telegram เพราะส่งเข้า LINE ไม่สำเร็จ (ปุ่ม "แก้ไขแล้ว" ใช้ไม่ได้กับข้อความนี้)',
         lineRef,
         '',
         `👤 ผู้ส่ง: ${name || 'ไม่ระบุชื่อ'} (${phone || 'ไม่ระบุเบอร์โทร'})`,
@@ -917,17 +920,21 @@ app.post(
                 return res.json({ success: true, line_sent: true, delivered_via: 'line' });
             }
 
-            // 2) ส่งไป Telegram เฉพาะเมื่อโควต้า LINE รายเดือนหมดเท่านั้น
+            // 2) ส่งไป Telegram เมื่อ LINE ล้มเหลวทุกกรณี (โควต้าหมด, token หมดอายุ, LINE ล่ม, timeout ฯลฯ)
             //    ใช้เลข Ticket เดียวกัน จึงต่อเนื่องจาก Ticket ล่าสุดที่ส่งเข้า LINE สำเร็จ
-            if (lineResult.quotaExceeded) {
-                const lastLineTicket = await getLastLineTicket();
-                const telegramOk = await sendTelegramAlert({ ...alertData, lastLineTicket });
-                if (telegramOk) {
-                    await saveFeedbackRecord(buildFeedbackRecord(alertData, 'sent', 'telegram')); // 💾 เก็บลง Redis
-                    // ตอบสำเร็จเหมือนปกติ ลูกค้าไม่เห็นข้อผิดพลาด
-                    // (line_sent: true เพื่อให้หน้าเว็บเดิมที่ตรวจ field นี้ไม่แสดง error; ช่องทางจริงดูที่ delivered_via)
-                    return res.json({ success: true, line_sent: true, delivered_via: 'telegram' });
-                }
+            //    หมายเหตุ: ถ้า LINE ส่งถึงแล้วแต่ตอบกลับช้าจน timeout อาจได้ข้อความซ้ำใน Telegram (เลข Ticket เดียวกัน)
+            //    ซึ่งดีกว่าข้อความของลูกค้าหายไป
+            const lastLineTicket = await getLastLineTicket();
+            const telegramOk = await sendTelegramAlert({
+                ...alertData,
+                lastLineTicket,
+                quotaExceeded: lineResult.quotaExceeded
+            });
+            if (telegramOk) {
+                await saveFeedbackRecord(buildFeedbackRecord(alertData, 'sent', 'telegram')); // 💾 เก็บลง Redis
+                // ตอบสำเร็จเหมือนปกติ ลูกค้าไม่เห็นข้อผิดพลาด
+                // (line_sent: true เพื่อให้หน้าเว็บเดิมที่ตรวจ field นี้ไม่แสดง error; ช่องทางจริงดูที่ delivered_via)
+                return res.json({ success: true, line_sent: true, delivered_via: 'telegram' });
             }
 
             // 3) ส่งไม่สำเร็จเลย: คืนเลข Ticket เพื่อไม่ให้เลขข้าม แล้วแจ้งผู้ใช้ให้กดส่งใหม่
