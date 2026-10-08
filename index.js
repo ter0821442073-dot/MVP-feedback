@@ -1,6 +1,7 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
+import net from 'net';
 
 dotenv.config();
 
@@ -31,6 +32,9 @@ const PHONE_REGEX = /^[0-9+\-()\s]{6,20}$/;
 // ตัดช่องว่างและเครื่องหมาย " หรือ ' ที่ครอบค่า (มักติดมาตอนก๊อปจาก .env ไปวางใน Vercel/Render)
 const env = (name) => (process.env[name] ?? '').trim().replace(/^(["'])(.*)\1$/s, '$2').trim();
 
+/** ปิดบัง ID ใน log: แสดงเฉพาะ 6 ตัวท้าย */
+const maskId = (id) => (id ? `…${String(id).slice(-6)}` : '-');
+
 // เตือนตั้งแต่เริ่มระบบ ถ้าตั้งค่าไม่ครบ
 (function checkEnvOnStartup() {
     if (!env('LINE_CHANNEL_SECRET')) console.error('❌ LINE_CHANNEL_SECRET is not set — /api/webhook will reject all requests');
@@ -38,6 +42,13 @@ const env = (name) => (process.env[name] ?? '').trim().replace(/^(["'])(.*)\1$/s
     if (!env('LINE_TARGET_ID')) console.warn('⚠️ LINE_TARGET_ID is not set — feedback cannot be pushed (คำสั่ง "id" ในกลุ่มยังใช้ได้)');
     if (!env('UPSTASH_REDIS_REST_URL') || !env('UPSTASH_REDIS_REST_TOKEN')) {
         console.warn('⚠️ Redis is not configured — ใช้ in-memory แทน (เลขลำดับ/สถานะ ticket/rate limit/ข้อมูล Feedback จะหายเมื่อ restart และไม่ทำงานข้าม instance)');
+    }
+    if (!env('TURNSTILE_SECRET_KEY')) {
+        if (env('REQUIRE_TURNSTILE') === 'true') {
+            console.error('❌ REQUIRE_TURNSTILE=true แต่ไม่ได้ตั้ง TURNSTILE_SECRET_KEY — /api/feedback จะปฏิเสธทุกคำขอ');
+        } else {
+            console.warn('⚠️ Turnstile ไม่ได้เปิดใช้งาน (ไม่มีการตรวจบอท) — บน production แนะนำให้ตั้ง TURNSTILE_SECRET_KEY และ REQUIRE_TURNSTILE=true');
+        }
     }
 })();
 
@@ -360,6 +371,46 @@ async function updateFeedbackRecord(ticketId, patch) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 🚦 Rate limiting
+// ---------------------------------------------------------------------------
+
+/**
+ * แปลง IP เป็นคีย์สำหรับ rate limit
+ * - IPv4 → ใช้ตามเดิม
+ * - IPv4-mapped IPv6 (::ffff:1.2.3.4) → แปลงเป็น IPv4
+ * - IPv6 → รวมเป็นกลุ่ม /64 (ผู้ใช้ปลายทางมักได้รับทั้ง /64) กันการหมุนที่อยู่เลี่ยง limit
+ */
+function ipKey(raw) {
+    if (!raw) return 'unknown';
+    let ip = String(raw).trim().split('%')[0];
+
+    const mapped = ip.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i);
+    if (mapped) ip = mapped[1];
+
+    const kind = net.isIP(ip);
+    if (kind === 4) return ip;
+    if (kind !== 6) return 'unknown';
+
+    // ขยาย IPv6 ให้ครบ 8 กลุ่ม
+    let s = ip;
+    if (s.includes('.')) { // มี IPv4 ต่อท้าย เช่น ::1.2.3.4
+        const idx = s.lastIndexOf(':');
+        const v4 = s.slice(idx + 1).split('.').map(Number);
+        const hi = ((v4[0] << 8) | v4[1]).toString(16);
+        const lo = ((v4[2] << 8) | v4[3]).toString(16);
+        s = `${s.slice(0, idx + 1)}${hi}:${lo}`;
+    }
+    const hasGap = s.includes('::');
+    const [l, r = ''] = s.split('::');
+    const left = l ? l.split(':') : [];
+    const right = r ? r.split(':') : [];
+    const fill = hasGap ? Math.max(0, 8 - left.length - right.length) : 0;
+    const groups = [...left, ...Array(fill).fill('0'), ...right].map((g) => parseInt(g, 16).toString(16));
+
+    return `${groups.slice(0, 4).join(':')}::/64`;
+}
+
 /**
  * Fixed-window rate limiter
  */
@@ -391,23 +442,19 @@ async function consumeRateLimit(key, limit, windowSec) {
     };
 }
 
+/**
+ * Rate limit ต่อ IP (ด่านแรก ราคาถูก)
+ * ตัวนับรวมทั้งระบบ (global) ย้ายไปหักใน handler หลังผ่าน validation + Turnstile
+ * เพื่อไม่ให้ request ขยะใช้โควต้ารวมของลูกค้าจริงหมด
+ */
 async function feedbackRateLimit(req, res, next) {
     try {
-        const ip = req.ip || 'unknown';
-
-        const perIp = await consumeRateLimit(`ip:${ip}`, CONFIG.rateLimitPerIp, CONFIG.rateLimitWindowSec);
+        const perIp = await consumeRateLimit(`ip:${ipKey(req.ip)}`, CONFIG.rateLimitPerIp, CONFIG.rateLimitWindowSec);
         if (perIp.limited) {
             res.setHeader('Retry-After', String(perIp.retryAfterSec));
             const waitMin = Math.max(1, Math.ceil(perIp.retryAfterSec / 60));
             return res.status(429).json({ error: `ส่งข้อความบ่อยเกินไป กรุณารออีกประมาณ ${waitMin} นาทีแล้วลองใหม่` });
         }
-
-        const global = await consumeRateLimit('global', CONFIG.rateLimitGlobalPerHour, 3600);
-        if (global.limited) {
-            res.setHeader('Retry-After', String(global.retryAfterSec));
-            return res.status(429).json({ error: 'ระบบมีผู้ใช้งานจำนวนมาก กรุณาลองใหม่ภายหลัง' });
-        }
-
         next();
     } catch (err) {
         console.error('❌ Rate limit middleware error:', err.message);
@@ -436,11 +483,14 @@ function cleanTextInput(input) {
 }
 
 /**
- * ตรวจสอบ Cloudflare Turnstile (เปิดใช้เมื่อกำหนด TURNSTILE_SECRET_KEY)
+ * ตรวจสอบ Cloudflare Turnstile
+ * - ตั้ง TURNSTILE_SECRET_KEY → ตรวจจริง
+ * - ไม่ได้ตั้ง และ REQUIRE_TURNSTILE=true → ปฏิเสธ (fail-closed) กันลืมตั้งค่าบน production
+ * - ไม่ได้ตั้ง และไม่บังคับ → ข้าม (เหมาะกับ dev)
  */
 async function verifyTurnstile(token, ip) {
     const secret = env('TURNSTILE_SECRET_KEY');
-    if (!secret) return true; // ไม่ได้เปิดใช้งาน
+    if (!secret) return env('REQUIRE_TURNSTILE') !== 'true';
     if (typeof token !== 'string' || !token || token.length > 2048) return false;
 
     try {
@@ -812,10 +862,22 @@ app.post(
                 return res.status(400).json({ error: 'รูปแบบเบอร์โทรไม่ถูกต้อง' });
             }
 
-            // 🤖 ตรวจสอบ Turnstile (ถ้าเปิดใช้งาน)
+            // 🤖 ตรวจสอบ Turnstile
             const humanOk = await verifyTurnstile(body.turnstileToken, req.ip);
             if (!humanOk) {
                 return res.status(403).json({ error: 'การตรวจสอบความปลอดภัยไม่ผ่าน กรุณาลองใหม่' });
+            }
+
+            // 🌍 เพดานรวมทั้งระบบ: หักเฉพาะ request ที่ผ่าน validation + Turnstile แล้วเท่านั้น
+            //    (กัน request ขยะจากหลาย IP ใช้โควต้ารวมจนลูกค้าจริงส่งไม่ได้)
+            try {
+                const globalLimit = await consumeRateLimit('global', CONFIG.rateLimitGlobalPerHour, 3600);
+                if (globalLimit.limited) {
+                    res.setHeader('Retry-After', String(globalLimit.retryAfterSec));
+                    return res.status(429).json({ error: 'ระบบมีผู้ใช้งานจำนวนมาก กรุณาลองใหม่ภายหลัง' });
+                }
+            } catch (err) {
+                console.error('❌ Global rate limit error (ignored):', err.message);
             }
 
             const now = new Date();
@@ -891,11 +953,12 @@ async function handlePostback(event) {
 
     // 🔒 รับเฉพาะ Postback ที่มาจากกลุ่ม/ห้องเป้าหมายของระบบเท่านั้น
     const sourceId = event.source?.groupId || event.source?.roomId || event.source?.userId;
-    console.log(`📥 Postback received (source=${event.source?.type}, id=${sourceId}, hasReplyToken=${Boolean(event.replyToken)})`);
+    console.log(`📥 Postback received (source=${event.source?.type}, id=${maskId(sourceId)}, hasReplyToken=${Boolean(event.replyToken)})`);
 
     if (targetId && sourceId !== targetId) {
         // ถ้าเจอบรรทัดนี้ใน log แปลว่า LINE_TARGET_ID ไม่ตรงกับห้องที่กดปุ่ม → บอทจึงเงียบ
-        console.warn(`⚠️ Ignored postback from non-target source. sourceId=${sourceId} / LINE_TARGET_ID=${targetId}`);
+        // (ปิดบัง ID ไว้ แสดงแค่ 6 ตัวท้ายเพื่อเทียบกันได้)
+        console.warn(`⚠️ Ignored postback from non-target source. sourceId=${maskId(sourceId)} / LINE_TARGET_ID=${maskId(targetId)}`);
         return;
     }
 
@@ -991,12 +1054,14 @@ app.post(
 //    - ถ้าใส่ใน LINE ได้ครบทุกคำ → ส่ง LINE เสมอ
 //    - ถ้า LINE ใส่ไม่ครบ (จำกัด 5 ข้อความ x 5,000 ตัวอักษร) หรือ LINE ส่งไม่ได้ → ส่ง Telegram แทน
 //    - ลบข้อมูลเฉพาะเมื่อส่งครบทุกรายการสำเร็จแล้วเท่านั้น
+//    - มี lock กันการรันซ้อนกัน (cron retry / กดเรียกเอง)
 // ---------------------------------------------------------------------------
 const LINE_CHUNK_MAX_CHARS = 4500;     // LINE จำกัดข้อความละ 5000 ตัวอักษร เผื่อที่ไว้สำหรับหัวข้อ/หมายเหตุ
 const LINE_MAX_MESSAGES = 5;           // LINE จำกัด push ครั้งละไม่เกิน 5 ข้อความ (ข้อความที่ 1 = สรุปยอด)
 const TELEGRAM_CHUNK_MAX_CHARS = 4000; // Telegram จำกัดข้อความละ 4096 ตัวอักษร
 const TELEGRAM_MAX_MESSAGES = 15;      // เกินนี้จะส่งเป็นไฟล์ .txt แทน (กลุ่ม Telegram จำกัดราว 20 ข้อความ/นาที)
 const SUMMARY_SENT_TTL_SEC = 60 * 60 * 24 * 800;
+const SUMMARY_LOCK_TTL_SEC = 300;      // lock หมดอายุเองใน 5 นาที กันค้างถ้า function ถูกตัดกลางทาง
 
 // ตั้ง PURGE_AFTER_SUMMARY=false ถ้าต้องการปิดการลบอัตโนมัติ (ค่าเริ่มต้น = เปิด)
 const PURGE_ENABLED = env('PURGE_AFTER_SUMMARY') !== 'false';
@@ -1229,6 +1294,7 @@ async function sendYearlySummaryToTelegram(year, { head, listHeader, entries }) 
 
 /**
  * ส่งสรุปประจำปี แล้วลบข้อมูลของปีนั้น — ส่งซ้ำไม่ได้ถ้าเคยส่งสำเร็จแล้ว เว้นแต่ force
+ *  0) ขอ lock ก่อน ถ้ามีรอบอื่นกำลังรันอยู่ → คืน in_progress ทันที (กันส่งซ้ำ)
  *  1) ถ้า LINE ใส่ได้ครบทุกคำ → ส่ง LINE ก่อนเสมอ (ถ้า LINE ส่งไม่สำเร็จ → ลอง Telegram)
  *  2) ถ้า LINE ใส่ไม่ครบ → ส่ง Telegram ฉบับเต็มแทน
  *  3) ถ้า Telegram ใช้ไม่ได้ในกรณี 2 → ส่ง LINE ฉบับตัด (มีหมายเหตุบอกจำนวนที่ไม่ได้แสดง) ดีกว่าไม่ส่งเลย
@@ -1238,70 +1304,85 @@ async function sendYearlySummaryToTelegram(year, { head, listHeader, entries }) 
  */
 async function sendYearlySummary(year, { force = false } = {}) {
     const sentKey = `feedback:yearly_summary_sent:${year}`;
+    const lockKey = `feedback:summary_lock:${year}`;
 
-    // เคยส่งแล้ว?
-    const prevRaw = await redisCommand(['GET', sentKey]);
-    const prev = prevRaw ? JSON.parse(prevRaw) : null;
+    // 🔐 ขอ lock (SET NX EX) — ถ้าไม่ได้ แปลว่ามีอีกรอบกำลังทำงาน
+    const lock = await redisCommand(['SET', lockKey, String(Date.now()), 'NX', 'EX', SUMMARY_LOCK_TTL_SEC]);
+    if (lock !== 'OK') return { status: 'in_progress' };
 
-    if (prev) {
-        if (prev.purgedAt) {
-            // ข้อมูลถูกลบไปแล้ว ห้าม force ส่งซ้ำ เพราะจะได้สรุปว่างเปล่า
-            return { status: force ? 'already_purged' : 'already_sent', purgedAt: prev.purgedAt };
-        }
-        if (!force) {
-            // ส่งครบแล้วแต่ครั้งก่อนลบไม่เสร็จ → ลบต่อ โดยไม่ส่งสรุปซ้ำ
-            if (PURGE_ENABLED && prev.delivery !== 'truncated') {
-                const records = await loadYearFeedback(year);
-                const purge = await purgeAndMark(year, sentKey, prev, records);
-                return { status: 'already_sent', ...purge };
+    try {
+        // เคยส่งแล้ว?
+        const prevRaw = await redisCommand(['GET', sentKey]);
+        const prev = prevRaw ? JSON.parse(prevRaw) : null;
+
+        if (prev) {
+            if (prev.purgedAt) {
+                // ข้อมูลถูกลบไปแล้ว ห้าม force ส่งซ้ำ เพราะจะได้สรุปว่างเปล่า
+                return { status: force ? 'already_purged' : 'already_sent', purgedAt: prev.purgedAt };
             }
-            return { status: 'already_sent' };
+            if (!force) {
+                // ส่งครบแล้วแต่ครั้งก่อนลบไม่เสร็จ → ลบต่อ โดยไม่ส่งสรุปซ้ำ
+                if (PURGE_ENABLED && prev.delivery !== 'truncated') {
+                    const records = await loadYearFeedback(year);
+                    const purge = await purgeAndMark(year, sentKey, prev, records);
+                    return { status: 'already_sent', ...purge };
+                }
+                return { status: 'already_sent' };
+            }
+        }
+
+        const [records, counterRaw] = await Promise.all([
+            loadYearFeedback(year),
+            redisCommand(['GET', `feedback:ticket_counter:${year}`]),
+        ]);
+        const parts = buildYearlySummaryParts(year, Number(counterRaw) || 0, records);
+        const linePlan = planLineMessages(parts);
+        const fitsInLine = linePlan.omitted === 0;
+
+        let via = null, delivery = null, truncated = 0;
+
+        if (fitsInLine) {
+            const line = await sendLinePushTexts(linePlan.messages);
+            if (line.ok) { via = 'line'; delivery = 'messages'; }
+        }
+
+        if (!via) {
+            const tg = await sendYearlySummaryToTelegram(year, parts);
+            if (tg) { via = 'telegram'; delivery = tg; }
+        }
+
+        if (!via && !fitsInLine) {
+            // Telegram ใช้ไม่ได้ และ LINE ใส่ไม่ครบ: ส่ง LINE ฉบับตัดดีกว่าไม่ส่งเลย พร้อมบอกชัดว่าไม่ครบ
+            const messages = [...linePlan.messages];
+            messages[messages.length - 1] += `\n\n… และอีก ${linePlan.omitted} รายการ ไม่ได้แสดง (LINE จำกัดจำนวนข้อความ และส่งไป Telegram ไม่สำเร็จ)`;
+            const line = await sendLinePushTexts(messages);
+            if (line.ok) { via = 'line'; delivery = 'truncated'; truncated = linePlan.omitted; }
+        }
+
+        if (!via) return { status: 'send_failed' };
+
+        const sentInfo = { at: Date.now(), via, delivery };
+        await redisCommand(['SET', sentKey, JSON.stringify(sentInfo), 'EX', SUMMARY_SENT_TTL_SEC]);
+
+        // 🧹 ลบข้อมูลเฉพาะเมื่อส่งครบทุกรายการแล้วเท่านั้น (ฉบับตัด 'truncated' = ยังส่งไม่ครบ ห้ามลบ)
+        let purge = { purged: 0, skipped: true };
+        if (PURGE_ENABLED && delivery !== 'truncated') {
+            purge = await purgeAndMark(year, sentKey, sentInfo, records);
+        }
+
+        return {
+            status: 'sent', via, delivery, year, total: parts.total, entries: parts.entries.length,
+            lineMessages: via === 'line' ? linePlan.messages.length : undefined, truncated, ...parts.stats, ...purge,
+        };
+    } finally {
+        // ปล่อย lock เสมอ (สำเร็จ/ล้มเหลว/exception) เพื่อให้ลองใหม่ได้ทันที
+        // ถ้าส่งสำเร็จแล้ว sent marker จะกันการส่งซ้ำเอง
+        try {
+            await redisCommand(['DEL', lockKey]);
+        } catch (err) {
+            console.error('⚠️ Could not release summary lock (will expire by TTL):', err.message);
         }
     }
-
-    const [records, counterRaw] = await Promise.all([
-        loadYearFeedback(year),
-        redisCommand(['GET', `feedback:ticket_counter:${year}`]),
-    ]);
-    const parts = buildYearlySummaryParts(year, Number(counterRaw) || 0, records);
-    const linePlan = planLineMessages(parts);
-    const fitsInLine = linePlan.omitted === 0;
-
-    let via = null, delivery = null, truncated = 0;
-
-    if (fitsInLine) {
-        const line = await sendLinePushTexts(linePlan.messages);
-        if (line.ok) { via = 'line'; delivery = 'messages'; }
-    }
-
-    if (!via) {
-        const tg = await sendYearlySummaryToTelegram(year, parts);
-        if (tg) { via = 'telegram'; delivery = tg; }
-    }
-
-    if (!via && !fitsInLine) {
-        // Telegram ใช้ไม่ได้ และ LINE ใส่ไม่ครบ: ส่ง LINE ฉบับตัดดีกว่าไม่ส่งเลย พร้อมบอกชัดว่าไม่ครบ
-        const messages = [...linePlan.messages];
-        messages[messages.length - 1] += `\n\n… และอีก ${linePlan.omitted} รายการ ไม่ได้แสดง (LINE จำกัดจำนวนข้อความ และส่งไป Telegram ไม่สำเร็จ)`;
-        const line = await sendLinePushTexts(messages);
-        if (line.ok) { via = 'line'; delivery = 'truncated'; truncated = linePlan.omitted; }
-    }
-
-    if (!via) return { status: 'send_failed' };
-
-    const sentInfo = { at: Date.now(), via, delivery };
-    await redisCommand(['SET', sentKey, JSON.stringify(sentInfo), 'EX', SUMMARY_SENT_TTL_SEC]);
-
-    // 🧹 ลบข้อมูลเฉพาะเมื่อส่งครบทุกรายการแล้วเท่านั้น (ฉบับตัด 'truncated' = ยังส่งไม่ครบ ห้ามลบ)
-    let purge = { purged: 0, skipped: true };
-    if (PURGE_ENABLED && delivery !== 'truncated') {
-        purge = await purgeAndMark(year, sentKey, sentInfo, records);
-    }
-
-    return {
-        status: 'sent', via, delivery, year, total: parts.total, entries: parts.entries.length,
-        lineMessages: via === 'line' ? linePlan.messages.length : undefined, truncated, ...parts.stats, ...purge,
-    };
 }
 
 /**
